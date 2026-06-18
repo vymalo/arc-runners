@@ -1,0 +1,5 @@
+# The Dockerfile downloads everything it needs and COPYs nothing from the
+# build context, so keep the context minimal — only the Dockerfile is sent
+# to the daemon.
+*
+!Dockerfile

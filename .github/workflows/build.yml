@@ -1,0 +1,103 @@
+name: Build arc-runners image
+
+# Builds and publishes the self-hosted GitHub Actions runner image
+# (ghcr.io/vymalo/arc-runners).
+#
+# Runs on GitHub-hosted runners on purpose: this repo BOOTSTRAPS the runner
+# image, so it must not depend on a self-hosted runner of its own kind. The
+# cold build downloads/compiles a large toolchain (Rust + Flutter + Android
+# SDK + Node + Ruby + ops tools), so we free disk first and allow generous
+# time; a registry-backed buildx cache keeps warm rebuilds fast without
+# hitting the 10 GB GitHub Actions cache ceiling.
+#
+# Safety:
+#   - Pull requests BUILD but never PUSH (validate Dockerfile changes safely).
+#   - Publishes are gated to `main` and `v*` tags only.
+#   - Minimal permissions; GITHUB_TOKEN is mounted as a build secret for
+#     cargo-binstall's rate limit and is never baked into a layer.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/build.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: vymalo/arc-runners
+
+jobs:
+  build-and-push:
+    name: Build + push arc-runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free up disk space
+        run: |
+          # The image bakes a multi-GB toolchain; the hosted runner's ~14 GB
+          # free root disk isn't enough alongside the build cache. Everything
+          # is built INSIDE the container, so dropping the big preinstalled
+          # host SDKs is safe and buys ~25-40 GB.
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          # Publish only from main / tags; PRs and dispatched non-main refs
+          # build through buildx but ship nothing.
+          push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+          provenance: false
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
