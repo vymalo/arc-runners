@@ -20,9 +20,14 @@
 #                on OpenJDK 21, for `flutter build apk` / Gradle.
 #   Mobile rel — Ruby + bundler + fastlane (Android build/release lane).
 #   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client).
+#   Containers — rootless Buildah (image build) + Podman (run/compose) +
+#                docker-compose provider, for daemonless builds and compose
+#                smoke tests WITHOUT a privileged dind sidecar (vfs+chroot
+#                defaults; see README for the fuse-overlayfs fast-path).
 #   just deps  — chronic (moreutils, used by `just` recipe wrappers) +
 #                gum (pretty output, optional); pre-commit (pipx); zsh
-#                (hooks that run under `zsh -i -c`); jq.
+#                (hooks that run under `zsh -i -c`); jq + yq (YAML; the latter
+#                required by subosito/flutter-action's flutter-version-file).
 #
 # Bump any tool by editing its ARG below; the image rebuilds on the next
 # push touching `Dockerfile` (or via workflow_dispatch).
@@ -46,6 +51,17 @@ ARG FLUTTER_VERSION=3.44.2
 ARG NODE_VERSION=24.16.0
 ARG PNPM_VERSION=10.33.2
 ARG GUM_VERSION=0.17.0
+# yq (mikefarah) — YAML processor. Required by subosito/flutter-action when a
+# workflow uses `flutter-version-file:` (its setup.sh shells out to `yq`).
+# GitHub-hosted ubuntu bundles it; this image must bake it (we ship `jq`, not `yq`).
+# yq has no per-binary .sha256 asset, so the digest is pinned here (cross-checked
+# against the release `checksums` table, SHA-256 column) and verified at build.
+ARG YQ_VERSION=4.53.3
+ARG YQ_SHA256=fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4
+# Docker Compose binary — used ONLY as the `podman compose` provider (Podman
+# runs the dev-stack smoke test; no Docker daemon involved). Verified at build
+# via the release's published .sha256 asset.
+ARG COMPOSE_VERSION=5.2.0
 # FRB CLI MUST match the plugins' `flutter_rust_bridge = "=2.12.0"`; this is
 # repo-pinned, not a latest-tracking value.
 ARG FRB_VERSION=2.12.0
@@ -102,6 +118,53 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+# ---- Rootless container build (Buildah) + run (Podman) — replaces dind -------
+# Daemonless + rootless: jobs build images (buildah) and run compose stacks
+# (podman) WITHOUT a privileged `docker:dind` sidecar, so the runner pod is a
+# single unprivileged container. buildah/podman track Ubuntu's repo — apt
+# version strings are codename-specific and brittle to pin, unlike the ARG-
+# driven binary downloads — so they are intentionally unpinned here.
+RUN set -eux; \
+    apt-get update -y; \
+    apt-get install -y --no-install-recommends \
+      buildah \
+      podman \
+      fuse-overlayfs \
+      uidmap \
+      slirp4netns \
+      passt; \
+    rm -rf /var/lib/apt/lists/*; \
+    buildah --version; podman --version
+
+# Compose provider for `podman compose` — pinned + checksum-verified against the
+# release's published .sha256 asset.
+RUN set -eux; \
+    base="https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}"; \
+    curl --proto '=https' --tlsv1.2 -fsSL "${base}/docker-compose-linux-x86_64" -o /tmp/docker-compose; \
+    curl --proto '=https' --tlsv1.2 -fsSL "${base}/docker-compose-linux-x86_64.sha256" -o /tmp/docker-compose.sha256; \
+    echo "$(cut -d' ' -f1 /tmp/docker-compose.sha256)  /tmp/docker-compose" | sha256sum -c -; \
+    install -m 0755 /tmp/docker-compose /usr/local/bin/docker-compose; \
+    rm -f /tmp/docker-compose /tmp/docker-compose.sha256; \
+    docker-compose version
+
+# Rootless defaults so it works in a stock unprivileged pod: `vfs` storage (no
+# /dev/fuse needed) + subuid/subgid for the runner user. Override to overlay +
+# fuse-overlayfs (mount /dev/fuse) for the speed fast-path — see README.
+RUN set -eux; \
+    mkdir -p /etc/containers; \
+    printf '[storage]\ndriver = "vfs"\n' > /etc/containers/storage.conf; \
+    printf 'runner:100000:65536\n' > /etc/subuid; \
+    printf 'runner:100000:65536\n' > /etc/subgid
+
+# ---- yq (mikefarah) — required by subosito/flutter-action; digest-verified ----
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64" \
+      -o /usr/local/bin/yq; \
+    echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/yq; \
+    yq --version
 
 # ---- sccache (shared S3-compatible compilation cache) -----------------
 # Prebuilt musl binary (seconds to fetch vs minutes to compile). Consumed
