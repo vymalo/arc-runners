@@ -15,6 +15,12 @@ name: Build arc-runners image
 #   - Publishes are gated to `main` and `v*` tags only.
 #   - Minimal permissions; GITHUB_TOKEN is mounted as a build secret for
 #     cargo-binstall's rate limit and is never baked into a layer.
+#
+# Matrix: fans out over JAVA_VERSION x NODE major and publishes one image per
+# combo as `:jdk<java>-node<major>`. Currently Java 21 x Node {22,24} (two
+# images); the JAVA axis is kept matrix-shaped so a JDK 25 leg can be re-added
+# in one line once validated. The canonical jdk21-node24 combo is also published
+# as the moving `:latest` and `:<sha7>` tags. amd64-only.
 
 on:
   push:
@@ -35,19 +41,37 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: false
-
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: vymalo/arc-runners
 
 jobs:
   build-and-push:
-    name: Build + push arc-runners
+    name: Build jdk${{ matrix.java }}-node${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
+    # Per-combo concurrency so the four matrix legs don't serialize against
+    # each other (cancel-in-progress stays off — a publish shouldn't be killed).
+    concurrency:
+      group: build-${{ github.ref }}-jdk${{ matrix.java }}-node${{ matrix.node }}
+      cancel-in-progress: false
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Java 21 only for now — it's inside every current Gradle/AGP support
+        # window, so Android builds are safe. Add '25' here (and validate it
+        # against the consuming repo's Gradle/AGP pins) to ship a JDK 25 leg.
+        java: ['21']
+        node: ['22', '24']
+        # Map each Node major to the full pinned x.y.z passed as NODE_VERSION.
+        # Re-resolve the patch from nodejs.org/dist when bumping.
+        include:
+          - node: '22'
+            node_version: '22.23.1'
+          - node: '24'
+            node_version: '24.18.0'
 
     steps:
       - name: Checkout
@@ -69,9 +93,27 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
 
-      - name: Resolve short SHA
-        id: sha
-        run: echo "short=$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - name: Compute tags + cache ref
+        id: meta
+        env:
+          JAVA: ${{ matrix.java }}
+          NODE: ${{ matrix.node }}
+        run: |
+          sha7="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          base="${REGISTRY}/${IMAGE_NAME}"
+          combo="jdk${JAVA}-node${NODE}"
+
+          # Every combo gets a moving combo tag + an immutable per-commit tag.
+          tags="${base}:${combo}"$'\n'"${base}:${combo}-${sha7}"
+          # The canonical combo additionally moves :latest and :<sha7>.
+          if [ "${JAVA}" = "21" ] && [ "${NODE}" = "24" ]; then
+            tags="${tags}"$'\n'"${base}:latest"$'\n'"${base}:${sha7}"
+          fi
+
+          {
+            echo "tags<<EOF"; echo "$tags"; echo "EOF";
+            echo "cache=${base}:buildcache-${combo}";
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -90,14 +132,16 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/amd64
+          build-args: |
+            JAVA_VERSION=${{ matrix.java }}
+            NODE_VERSION=${{ matrix.node_version }}
           # Publish only from main / tags; PRs and dispatched non-main refs
           # build through buildx but ship nothing.
           push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
           provenance: false
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          # Per-combo cache ref so the four legs don't clobber each other's cache.
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache }}
+          cache-to: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) && format('type=registry,ref={0},mode=max', steps.meta.outputs.cache) || '' }}

@@ -14,10 +14,17 @@
 #                target; cargo tools: cargo-llvm-cov, just, cargo-nextest,
 #                cargo-deny, sccache (shared S3-compatible compile cache).
 #   Codegen    — flutter_rust_bridge_codegen (FRB) + cratestack-cli.
-#   Node/JS    — Node LTS + pnpm (via corepack).
+#   Node/JS    — Node + pnpm (via corepack). Node major is a BUILD MATRIX
+#                axis: we ship 22 and 24 (set via NODE_VERSION build-arg).
+#   Browser    — Google Chrome stable (headless) for web/e2e test lanes
+#                (`flutter test --platform chrome`, Karma, Puppeteer). amd64-only.
 #   Flutter    — Flutter SDK (bundles Dart) + precached engine artifacts.
 #   Android    — cmdline-tools + platform-tools + build-tools + platform,
-#                on OpenJDK 21, for `flutter build apk` / Gradle.
+#                on OpenJDK 21 (JAVA_VERSION arg), for `flutter build apk`
+#                / Gradle. JDK 21 is inside every current Gradle/AGP support
+#                window. The arg is parameterized so a JDK 25 leg can be added
+#                later, but only 21 is built today (newer JDKs need validation
+#                against the consuming repo's Gradle/AGP pins first).
 #   Mobile rel — Ruby + bundler + fastlane (Android build/release lane).
 #   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client).
 #   Containers — rootless Buildah (image build) + Podman (run/compose) +
@@ -32,8 +39,18 @@
 # Bump any tool by editing its ARG below; the image rebuilds on the next
 # push touching `Dockerfile` (or via workflow_dispatch).
 #
+# ARCHITECTURE: x86_64 / linux/amd64 ONLY. Every binary download below pulls
+# an amd64 asset and Google Chrome ships no arm64 Linux build, so there is no
+# arm64 variant for now. The workflow builds `platforms: linux/amd64`.
+#
+# BUILD MATRIX: the workflow fans out over JAVA_VERSION x NODE_VERSION and
+# publishes one image per combo (e.g. `:jdk21-node24`). The `:latest` /
+# `:<sha7>` tags track the canonical jdk21-node24 combo. The ARG defaults
+# below reproduce that canonical combo for a plain `docker build`.
+#
 # Build + publish: `.github/workflows/build.yml`.
-# Published as `ghcr.io/vymalo/arc-runners:latest` + `:<sha7>`.
+# Published as `ghcr.io/vymalo/arc-runners:jdk<JAVA>-node<NODE_MAJOR>` (+ the
+# canonical combo also as `:latest` / `:<sha7>`).
 # Deploy: point the ARC RunnerSet's runner container `image:` at the
 # published tag (see README.md).
 
@@ -46,10 +63,18 @@ USER root
 # (github releases/latest, nodejs.org/dist, dl.k8s.io/stable.txt, the
 # Flutter + Android package manifests, crates.io) — not guessed. Re-resolve
 # when bumping. FRB / pnpm are repo-determined (see notes).
-ARG SCCACHE_VERSION=0.15.0
-ARG FLUTTER_VERSION=3.44.2
-ARG NODE_VERSION=24.16.0
-ARG PNPM_VERSION=10.33.2
+# JAVA_VERSION + NODE_VERSION are BUILD MATRIX axes (see header). The defaults
+# below are the canonical `:latest` combo (JDK 21 + Node 24); the workflow
+# overrides them per matrix combo via build-args. JAVA_VERSION selects the
+# `openjdk-<N>-jdk-headless` apt package + the JAVA_HOME path; the noble base
+# offers 21 and 25, but only 21 is built today (25 needs Gradle/AGP validation
+# first). NODE_VERSION is the full x.y.z (Node 22.x or 24.x); re-resolve the
+# patch from nodejs.org/dist when bumping a major.
+ARG JAVA_VERSION=21
+ARG NODE_VERSION=24.18.0
+ARG SCCACHE_VERSION=0.16.0
+ARG FLUTTER_VERSION=3.44.4
+ARG PNPM_VERSION=11.9.0
 ARG GUM_VERSION=0.17.0
 # yq (mikefarah) — YAML processor. Required by subosito/flutter-action when a
 # workflow uses `flutter-version-file:` (its setup.sh shells out to `yq`).
@@ -68,7 +93,7 @@ ARG FRB_VERSION=2.12.0
 # cratestack-cli tracks the consuming project's cratestack version
 # (resolved from crates.io). Keep it in lockstep with that pin.
 ARG CRATESTACK_VERSION=0.4.8
-ARG ANDROID_CMDLINE_TOOLS=14742923
+ARG ANDROID_CMDLINE_TOOLS=15641748
 # Latest STABLE platform + build-tools, resolved from Google's package
 # manifest filtered to the stable channel (channel-0):
 #   xmllint --xpath '//remotePackage[channelRef/@ref="channel-0" and
@@ -82,9 +107,9 @@ ARG ANDROID_BUILD_TOOLS=37.0.0
 ARG KUBECTL_VERSION=1.36.2
 # helm 4.x — major bump from 3.x, but it maintains chart backwards
 # compatibility (https://helm.sh/docs/overview/), so existing charts work.
-ARG HELM_VERSION=4.2.1
-ARG ARGOCD_VERSION=3.4.3
-ARG FASTLANE_CONSTRAINT="~> 2.228"
+ARG HELM_VERSION=4.2.2
+ARG ARGOCD_VERSION=3.4.4
+ARG FASTLANE_CONSTRAINT="~> 2.236"
 
 # ---- System packages --------------------------------------------------
 # build-base/headers for the cargo workspace (aws-lc-sys, ring,
@@ -92,8 +117,8 @@ ARG FASTLANE_CONSTRAINT="~> 2.228"
 # Flutter + Android SDK archives. zsh for pre-commit hooks (`zsh -i -c`).
 # moreutils provides `chronic`, REQUIRED by every justfile recipe's `qr`.
 # jq for shell tooling. pipx + python3-venv to install pre-commit. Java
-# (OpenJDK 21 — the latest JDK supported by Android Studio) + Ruby for the
-# Android / fastlane lanes.
+# (OpenJDK, JAVA_VERSION matrix axis — 21 is the AGP-supported LTS, 25 the
+# newer LTS) + Ruby for the Android / fastlane lanes.
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
        build-essential \
@@ -113,11 +138,11 @@ RUN apt-get update -y \
        jq \
        pipx \
        python3-venv \
-       openjdk-21-jdk-headless \
+       "openjdk-${JAVA_VERSION}-jdk-headless" \
        ruby-full \
     && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_VERSION}-openjdk-amd64
 
 # ---- Rootless container build (Buildah) + run (Podman) — replaces dind -------
 # Daemonless + rootless: jobs build images (buildah) and run compose stacks
@@ -193,6 +218,33 @@ RUN set -eux; \
     corepack prepare "pnpm@${PNPM_VERSION}" --activate; \
     node --version; \
     pnpm --version
+
+# ---- Google Chrome stable (headless) — web/e2e test lanes -------------
+# For `flutter test --platform chrome`, Karma, Puppeteer, etc. Installed from
+# Google's official apt repo (amd64-only — there is no arm64 Linux Chrome, which
+# is one reason this image is x86-only). The .deb declares its own runtime libs
+# (libnss3, libgbm, libasound2, ...) so apt pulls them in; fonts-liberation is
+# added for sane text rendering in headless screenshots. `chromium` is symlinked
+# for tools that probe for that name. CHROME_EXECUTABLE is what Flutter web reads;
+# CHROME_BIN / PUPPETEER_EXECUTABLE_PATH cover Karma / Puppeteer (whose bundled
+# download we skip via PUPPETEER_SKIP_DOWNLOAD).
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+      | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg; \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+      > /etc/apt/sources.list.d/google-chrome.list; \
+    apt-get update -y; \
+    apt-get install -y --no-install-recommends \
+      google-chrome-stable \
+      fonts-liberation; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf /usr/bin/google-chrome-stable /usr/local/bin/chromium; \
+    google-chrome-stable --version
+
+ENV CHROME_EXECUTABLE=/usr/bin/google-chrome-stable \
+    CHROME_BIN=/usr/bin/google-chrome-stable \
+    PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 # ---- gum (charmbracelet) — optional pretty output for justfile recipes -
 RUN set -eux; \
