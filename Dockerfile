@@ -116,7 +116,9 @@ ARG FASTLANE_CONSTRAINT="~> 2.236"
 # libsqlite3-sys, openssl-sys, bindgen). unzip/xz-utils/zip for the
 # Flutter + Android SDK archives. zsh for pre-commit hooks (`zsh -i -c`).
 # moreutils provides `chronic`, REQUIRED by every justfile recipe's `qr`.
-# jq for shell tooling. pipx + python3-venv to install pre-commit. Java
+# jq for shell tooling. gnupg provides `gpg` to dearmor the Google Chrome
+# apt signing key (present in the base today, listed explicitly so the build
+# doesn't silently depend on it). pipx + python3-venv to install pre-commit. Java
 # (OpenJDK, JAVA_VERSION matrix axis — 21 is the AGP-supported LTS, 25 the
 # newer LTS) + Ruby for the Android / fastlane lanes.
 RUN apt-get update -y \
@@ -129,6 +131,7 @@ RUN apt-get update -y \
        libclang-dev \
        ca-certificates \
        curl \
+       gnupg \
        git \
        unzip \
        xz-utils \
