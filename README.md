@@ -172,6 +172,25 @@ template:
 > `fuse-overlayfs` speed fast-path, additionally mount `/dev/fuse` and switch the
 > storage driver — see the storage note in the Dockerfile.
 
+> **Node-kernel caveat (Ubuntu 24.04 / kernel ≥ 6.8):** `allowPrivilegeEscalation`
+> is necessary but **not always sufficient**. These kernels default
+> `kernel.apparmor_restrict_unprivileged_userns=1`, which denies the `uid_map`
+> write (even a bare `unshare -U -r` fails) regardless of caps or AppArmor profile
+> on the *pod*. It's an **unnamespaced node sysctl**, so no `securityContext` can
+> re-grant it — either set `kernel.apparmor_restrict_unprivileged_userns=0` on the
+> node (sysctl or kernel cmdline), or run the runner `privileged: true`
+> (CAP_SYS_ADMIN satisfies the restriction). Tell them apart by reading
+> `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` on the runner.
+
+### `podman compose` needs container DNS (netavark)
+
+`podman compose` stacks resolve each other by **service name** (`redis`,
+`wiremock`, …). Podman's default **CNI** backend ships no DNS plugin, so those
+lookups fall through to the host/cluster resolver and fail with
+`lookup <svc>: no such host`. This image therefore installs **`netavark` +
+`aardvark-dns`** and pins `network_backend = "netavark"` in
+`/etc/containers/containers.conf`, so compose service discovery works out of the box.
+
 ## Optional shared caches
 
 The image bakes `sccache` and `mc`, but **no cache endpoints or credentials are

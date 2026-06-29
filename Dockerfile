@@ -158,12 +158,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       buildah \
       podman \
+      netavark \
+      aardvark-dns \
       fuse-overlayfs \
       uidmap \
       slirp4netns \
       passt; \
     rm -rf /var/lib/apt/lists/*; \
-    buildah --version; podman --version
+    buildah --version; podman --version; netavark --version
 
 # Compose provider for `podman compose` — pinned + checksum-verified against the
 # release's published .sha256 asset.
@@ -182,6 +184,10 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p /etc/containers; \
     printf '[storage]\ndriver = "vfs"\n' > /etc/containers/storage.conf; \
+    # Force the netavark backend (+ aardvark-dns) so `podman compose` containers
+    # resolve each other by service name. The default CNI backend ships no DNS
+    # plugin, so compose stacks fail with "lookup <svc>: no such host".
+    printf '[network]\nnetwork_backend = "netavark"\n' > /etc/containers/containers.conf; \
     printf 'runner:100000:65536\n' > /etc/subuid; \
     printf 'runner:100000:65536\n' > /etc/subgid
 
