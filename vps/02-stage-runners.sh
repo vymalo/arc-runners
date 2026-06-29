@@ -9,11 +9,19 @@
 set -euo pipefail
 
 # ---- config -------------------------------------------------------------
+# A runner's footprint is split across TWO cgroups: the agent (a system service
+# under runners.slice) and its build containers (under the user's slice). They
+# have independent quotas, so the per-runner ceiling is the SUM. Keep the agent
+# budget small (it only orchestrates) so the headline total stays honest:
+#   agent 1 GiB + containers 9 GiB = 10 GiB per runner  ×3 = 30 GiB ≤ 31 GiB host.
 NUM_RUNNERS=3
-CPU_QUOTA="400%"      # 4 vCPU ceiling per runner
-MEM_MAX="10G"         # hard memory cap per runner
-MEM_HIGH="9500M"      # soft throttle before the hard cap
-MEM_SWAP_MAX="2G"     # allow limited swap per runner under pressure
+CONTAINER_CPU_QUOTA="400%"   # 4 vCPU ceiling for the build workload (user slice)
+CONTAINER_MEM_MAX="9G"       # hard cap for build containers — the real workload
+CONTAINER_MEM_HIGH="8500M"   # soft throttle before the hard cap
+AGENT_CPU_QUOTA="100%"       # the .NET listener/worker does no heavy lifting
+AGENT_MEM_MAX="1G"
+AGENT_MEM_HIGH="768M"
+MEM_SWAP_MAX="2G"            # limited swap per cgroup under pressure
 ORG="vymalo"   # runner labels are applied at registration — see register-runner.sh
 SUBID_SIZE=65536
 SUBID_BASE=100000
@@ -38,7 +46,9 @@ echo "runner version: ${RUNNER_VERSION}"
 mkdir -p /opt/actions-runner-cache
 if [[ ! -f "$CACHE" ]]; then
   log "downloading ${TARBALL}"
-  curl -fsSL -o "$CACHE" "$URL"
+  # Download to a temp path and rename only on success, so an interrupted fetch
+  # never leaves a truncated file that a re-run mistakes for a valid cache hit.
+  curl -fsSL -o "${CACHE}.part" "$URL" && mv -f "${CACHE}.part" "$CACHE"
 fi
 
 for i in $(seq 1 "$NUM_RUNNERS"); do
@@ -99,10 +109,19 @@ for i in $(seq 1 "$NUM_RUNNERS"); do
   fi
   chown -R "${USER}:${USER}" "$RUN_DIR"
 
-  # --- .env: inject podman socket into every job's environment ----------
+  # --- .env: inject the docker-compat socket into every job's environment -
+  # DOCKER_HOST points at /var/run/docker.sock, NOT the raw /run/user/<uid>
+  # path: the latter does not exist inside a container: job (only the bind-
+  # mounted /var/run/docker.sock does), and on host jobs the runner service's
+  # private mount ns resolves /var/run/docker.sock to the same rootless socket.
+  # One value that works in both contexts.
+  # rm -f first: after the first run this dir is runner-owned, so a prior job
+  # could swap .env for a symlink to a root file; removing the link (not its
+  # target) before writing prevents a root-following clobber (TOCTOU).
+  rm -f "${RUN_DIR}/.env"
   cat > "${RUN_DIR}/.env" <<EOF
 XDG_RUNTIME_DIR=${RTD}
-DOCKER_HOST=unix://${RTD}/podman/podman.sock
+DOCKER_HOST=unix:///var/run/docker.sock
 DOCKER_BUILDKIT=0
 EOF
   # 0600: the .env is the conventional place secrets get added later; keep it
@@ -117,22 +136,26 @@ EOF
   mkdir -p "$DROPDIR"
   cat > "${DROPDIR}/10-resources.conf" <<EOF
 [Unit]
-# The user systemd instance owns the rootless podman.socket that BindPaths
-# below depends on; order after it. Restart=always (set by svc.sh's unit)
-# self-heals the rare boot race where the socket isn't up yet.
+# Order after the user manager that owns the rootless podman.socket which
+# BindPaths (below) depends on.
 After=user@${UID_N}.service
 Wants=user@${UID_N}.service
 
 [Service]
+# The stock actions-runner unit sets NO Restart=, so if BindPaths loses the
+# boot race against the user's podman.socket the runner would stay down. Add an
+# explicit restart policy: a failed start retries until the socket exists.
+Restart=always
+RestartSec=5
 # --- resource bound for the runner AGENT process ---
-# NOTE: this caps only the .NET listener/worker. Rootless build CONTAINERS are
-# spawned by the user's podman service and live under user-<uid>.slice, NOT
-# here — they are capped separately below. See the user-slice drop-in.
+# NOTE: this caps only the .NET listener/worker (kept deliberately small — it
+# only orchestrates). Rootless build CONTAINERS run under user-<uid>.slice and
+# are capped separately below; the per-runner total is agent + container slice.
 Slice=runners.slice
-CPUQuota=${CPU_QUOTA}
+CPUQuota=${AGENT_CPU_QUOTA}
 CPUWeight=100
-MemoryMax=${MEM_MAX}
-MemoryHigh=${MEM_HIGH}
+MemoryMax=${AGENT_MEM_MAX}
+MemoryHigh=${AGENT_MEM_HIGH}
 MemorySwapMax=${MEM_SWAP_MAX}
 TasksMax=12288
 IOWeight=100
@@ -140,7 +163,7 @@ LimitNOFILE=1048576
 LimitNPROC=65536
 # --- rootless podman wiring for the runner agent ---
 Environment=XDG_RUNTIME_DIR=${RTD}
-Environment=DOCKER_HOST=unix://${RTD}/podman/podman.sock
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
 # GitHub's runner unconditionally bind-mounts /var/run/docker.sock into every
 # container: job. podman-docker symlinks that to /run/podman/podman.sock (the
 # ROOTFUL socket, which we don't run), so it dangles and 'docker create' fails
@@ -160,14 +183,14 @@ EOF
   mkdir -p "$USLICEDIR"
   cat > "${USLICEDIR}/10-runner-cap.conf" <<EOF
 [Slice]
-CPUQuota=${CPU_QUOTA}
-MemoryMax=${MEM_MAX}
-MemoryHigh=${MEM_HIGH}
+CPUQuota=${CONTAINER_CPU_QUOTA}
+MemoryMax=${CONTAINER_MEM_MAX}
+MemoryHigh=${CONTAINER_MEM_HIGH}
 MemorySwapMax=${MEM_SWAP_MAX}
 TasksMax=24576
 EOF
 
-  echo "staged: ${RUN_DIR}  (cap: ${CPU_QUOTA} CPU / ${MEM_MAX} RAM, agent + containers)"
+  echo "staged: ${RUN_DIR}  (cap: ${CONTAINER_CPU_QUOTA} CPU / ${CONTAINER_MEM_MAX} containers + ${AGENT_MEM_MAX} agent)"
 done
 
 systemctl daemon-reload

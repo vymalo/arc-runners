@@ -35,8 +35,22 @@ system swap as buffer).
 - `user-<uid>.slice` — bounds everything the runner user runs, **including the
   rootless build containers**. Container jobs are launched by the user's Podman
   service under `user-<uid>.slice`, *not* under the runner service, so without a
-  cap there they would escape the limit and could consume the whole box. Both
-  drop-ins carry the same 4 vCPU / 10 GiB ceiling.
+  cap there they would escape the limit and could consume the whole box.
+
+These are **separate cgroups with independent quotas**, so a runner's true
+ceiling is the *sum*. The agent budget is kept deliberately small (it only
+orchestrates) so the headline number stays honest:
+
+| cgroup | what runs there | CPU | RAM |
+|---|---|---|---|
+| `actions.runner.…service` (runners.slice) | runner agent | 100% | 1 GiB |
+| `user-<uid>.slice` | build + service containers | 400% | 9 GiB |
+| **per-runner total** | | ~5 vCPU ceiling | **10 GiB** |
+
+3 × 10 GiB = 30 GiB ≤ 31 GiB host (CPU quotas are ceilings, freely
+oversubscribed). The agent service also carries `Restart=always` (the stock
+actions-runner unit sets none), so it self-heals if it loses the boot race
+against the user's `podman.socket`.
 
 Each runner runs as its own unprivileged user with its own subuid/subgid range
 and its own rootless Podman socket. A job in one runner cannot see or starve
@@ -50,10 +64,14 @@ Get a **registration token** (short-lived, not a PAT) from:
 
 ### Option A — one command (recommended)
 
+The token is passed via the environment (or prompted), never as a CLI arg, so
+it doesn't leak through `/proc/<pid>/cmdline` to the other runner users' jobs:
+
 ```bash
-sudo /opt/runners-bootstrap/register-runner.sh 1 <TOKEN>
-sudo /opt/runners-bootstrap/register-runner.sh 2 <TOKEN>   # fresh token each
-sudo /opt/runners-bootstrap/register-runner.sh 3 <TOKEN>
+sudo RUNNER_TOKEN=<TOKEN> /opt/runners-bootstrap/register-runner.sh 1
+sudo RUNNER_TOKEN=<TOKEN> /opt/runners-bootstrap/register-runner.sh 2   # fresh token each
+sudo RUNNER_TOKEN=<TOKEN> /opt/runners-bootstrap/register-runner.sh 3
+# or omit RUNNER_TOKEN and it prompts (input hidden)
 ```
 
 Tokens are single-use and expire in ~1h — grab a new one per runner.
@@ -145,6 +163,36 @@ at each runner's rootless socket (injected via the runner's `.env`), so plain
 > the container to run as root (`container.options: --user 0`). Plain
 > `container:` jobs that just build/test (the common case) are unaffected.
 
+### Image-build (buildah) jobs: run host-native, not in `container:`
+
+Building/pushing images with **buildah does NOT belong in a `container:` job**
+here. Nesting rootless buildah inside the podman-managed job container hits an
+unavoidable uid + storage-driver conflict (the image ships a pre-initialised
+rootless `overlay` store under the runner user's `$HOME`; running it as root
+can't reuse that store and can't cleanly override the driver). See
+[vymalo/hyperswitch#10](https://github.com/vymalo/hyperswitch/issues/10).
+
+The host already has rootless **buildah + fuse-overlayfs** configured per runner
+user. So run the build job directly on the runner — no `container:`:
+
+```yaml
+jobs:
+  build-images:
+    runs-on: [self-hosted, linux, x64]   # NO container:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          buildah login -u "$USER" -p "$TOKEN" ghcr.io
+          buildah build --layers -t ghcr.io/vymalo/foo:latest .
+          buildah push ghcr.io/vymalo/foo:latest
+```
+
+Storage is already overlay/rootless for the runner user; no `storage.conf`,
+`--user root`, or driver overrides needed. Keep `container:` only for jobs that
+need the baked toolchain (Rust/Flutter/Node) — and split those from the image
+build into separate jobs. Fully-qualify image refs (`public.ecr.aws/docker/library/postgres`)
+since the host defines no unqualified-search registries.
+
 ## Operating
 
 ```bash
@@ -168,6 +216,11 @@ systemctl start actions.runner.vymalo.vps-runner-1.service
 
 ### Removing a runner
 
+`<REMOVE_TOKEN>` is a fresh short-lived registration token — generate one from
+the **same** page used to add runners
+(<https://github.com/organizations/vymalo/settings/actions/runners/new>); it
+works for removal too.
+
 ```bash
 cd /home/runner-1/actions-runner
 sudo ./svc.sh stop && sudo ./svc.sh uninstall
@@ -182,9 +235,17 @@ touch a registered runner's config.
 
 ## Tuning the caps
 
-Edit `02-stage-runners.sh` (`CPU_QUOTA` / `MEM_MAX`) and re-run, or live:
+Edit `02-stage-runners.sh` (`CONTAINER_*` / `AGENT_*`) and re-run — that retunes
+both cgroups at once and is the recommended path. To tune live, remember there
+are **two** cgroups: the user slice bounds the real workload, so don't forget it.
 
 ```bash
+# the workload (build containers) — the one that usually matters:
+sudo systemctl set-property user-$(id -u runner-1).slice CPUQuota=300% MemoryMax=7G
+# the agent (rarely needs changing):
 sudo systemctl set-property actions.runner.vymalo.vps-runner-1.service \
-  CPUQuota=300% MemoryMax=8G
+  CPUQuota=100% MemoryMax=1G
 ```
+
+Setting only the `actions.runner.…service` cap (as earlier docs showed) retunes
+just the agent — your build containers stay bounded by the old user-slice cap.
