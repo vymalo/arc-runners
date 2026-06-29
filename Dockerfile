@@ -165,7 +165,10 @@ RUN set -eux; \
       slirp4netns \
       passt; \
     rm -rf /var/lib/apt/lists/*; \
-    buildah --version; podman --version; netavark --version
+    buildah --version; podman --version; \
+    # netavark/aardvark-dns install as podman helpers under /usr/lib/podman,
+    # not on PATH — verify them there (podman's default helper_binaries_dir).
+    /usr/lib/podman/netavark --version; test -x /usr/lib/podman/aardvark-dns
 
 # Compose provider for `podman compose` — pinned + checksum-verified against the
 # release's published .sha256 asset.
