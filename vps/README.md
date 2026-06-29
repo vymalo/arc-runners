@@ -26,8 +26,17 @@ hard-capped by systemd to its own slice of the machine.
 | vps-runner-3 | runner-3   | /home/runner-3/actions-runner   | 4 vCPU  | 10 GiB  |
 
 Host: 12 vCPU / 31 GiB. Caps are CPUQuota (ceiling, not reservation) so idle
-headroom is shared; memory is a hard `MemoryMax` per runner (+2 GiB swap each,
-8 GiB system swap as buffer).
+headroom is shared; memory is a hard `MemoryMax` (+2 GiB swap each, 8 GiB
+system swap as buffer).
+
+**The cap is applied in two places** (this matters):
+
+- `actions.runner.vymalo.vps-runner-N.service` — bounds the runner *agent*.
+- `user-<uid>.slice` — bounds everything the runner user runs, **including the
+  rootless build containers**. Container jobs are launched by the user's Podman
+  service under `user-<uid>.slice`, *not* under the runner service, so without a
+  cap there they would escape the limit and could consume the whole box. Both
+  drop-ins carry the same 4 vCPU / 10 GiB ceiling.
 
 Each runner runs as its own unprivileged user with its own subuid/subgid range
 and its own rootless Podman socket. A job in one runner cannot see or starve
@@ -121,6 +130,21 @@ OpenJDK 21, pnpm, kubectl, helm, Android SDK.
 at each runner's rootless socket (injected via the runner's `.env`), so plain
 `docker build` / `docker compose` in a job work too.
 
+> **Why a `BindPaths` drop-in exists.** GitHub's runner unconditionally
+> bind-mounts `/var/run/docker.sock` into every `container:` job. `podman-docker`
+> symlinks that path to the *rootful* `/run/podman/podman.sock`, which we don't
+> run — so it dangles and `docker create` fails with
+> `statfs /var/run/docker.sock: no such file or directory`. Each runner service
+> gets a private mount namespace (`BindPaths=…/podman.sock:/run/podman/podman.sock`)
+> that resolves it to that runner's own rootless socket. Fully rootless, no
+> cross-runner conflict.
+>
+> **Docker-in-docker caveat:** the mounted socket is owned by the host runner
+> user, which maps to *root* inside the rootless container. A workflow step that
+> shells out to `docker`/`podman` *from inside* the job container therefore needs
+> the container to run as root (`container.options: --user 0`). Plain
+> `container:` jobs that just build/test (the common case) are unaffected.
+
 ## Operating
 
 ```bash
@@ -131,9 +155,11 @@ systemctl status 'actions.runner.vymalo.vps-runner-*' --no-pager
 systemd-cgtop runners.slice
 systemctl status runners.slice
 
-# confirm a runner's caps actually bound
+# confirm BOTH caps bound — agent service AND the user slice (containers).
+# user-<uid>.slice is the one that actually bounds build containers; check it.
 systemctl show actions.runner.vymalo.vps-runner-1.service \
   -p CPUQuotaPerSecUSec -p MemoryMax -p Slice
+systemctl show user-$(id -u runner-1).slice -p CPUQuotaPerSecUSec -p MemoryMax
 
 # stop / start / restart one runner
 systemctl stop  actions.runner.vymalo.vps-runner-1.service

@@ -28,13 +28,18 @@ RUN_DIR="/home/${USER}/actions-runner"
 [[ -x "${RUN_DIR}/config.sh" ]] || { echo "runner ${idx} not staged at ${RUN_DIR}" >&2; exit 1; }
 
 echo "==> configuring ${NAME} as user ${USER}"
-sudo -u "$USER" bash -c "cd '${RUN_DIR}' && ./config.sh \
-  --url '${URL}' \
-  --token '${token}' \
-  --name '${NAME}' \
-  --labels '${LABELS}' \
+# Pass values as positional args ($1..$4), never interpolated into the script
+# body — the registration token is short-lived but could still contain shell
+# metacharacters; this avoids any quoting/expansion surprise.
+sudo -u "$USER" bash -s -- "$RUN_DIR" "$URL" "$token" "$NAME" "$LABELS" <<'INNER'
+cd "$1" && ./config.sh \
+  --url "$2" \
+  --token "$3" \
+  --name "$4" \
+  --labels "$5" \
   --work _work \
-  --unattended --replace"
+  --unattended --replace
+INNER
 
 echo "==> installing + starting service"
 cd "$RUN_DIR"
