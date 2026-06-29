@@ -135,6 +135,43 @@ set them to the same repository/tag pair instead.
 > runners. If you mirror the build onto a self-hosted runner elsewhere, recover
 > from a bad publish by re-pinning `image:` to the last-good `:<sha7>` tag.
 
+### Rootless container builds need `allowPrivilegeEscalation: true`
+
+The image bakes **rootless buildah/podman** with everything they need on the
+*image* side — `uidmap`, `/etc/subuid` + `/etc/subgid` ranges for the `runner`
+user, and `vfs` storage (no `/dev/fuse` required). But buildah/podman still have
+to set up a user namespace, which runs the **setuid** `newuidmap`/`newgidmap`.
+A hardened pod with `allowPrivilegeEscalation: false` sets `no_new_privs`, which
+disables setuid — so the mapping fails and image builds die while unpacking the
+base layer:
+
+```
+newuidmap: write to uid_map failed: Operation not permitted → Falling back to single mapping
+ApplyLayer ... remount /, flags: 0x44000: permission denied
+```
+
+Set `allowPrivilegeEscalation: true` on the runner container (it stays **non-root**
+— `runAsUser: 1001`, no added capabilities — far less than the privileged `dind`
+sidecar this replaces):
+
+```yaml
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/vymalo/arc-runners:jdk21-node24
+        securityContext:
+          runAsUser: 1001
+          runAsGroup: 1001
+          # setuid newuidmap/newgidmap → user namespace for rootless buildah/podman
+          allowPrivilegeEscalation: true
+```
+
+> The runner namespace's Pod Security Standard must be at least **`baseline`** for
+> this to be admitted (a `restricted` namespace rejects it). For the overlay +
+> `fuse-overlayfs` speed fast-path, additionally mount `/dev/fuse` and switch the
+> storage driver — see the storage note in the Dockerfile.
+
 ## Optional shared caches
 
 The image bakes `sccache` and `mc`, but **no cache endpoints or credentials are
