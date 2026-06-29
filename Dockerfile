@@ -160,6 +160,7 @@ RUN set -eux; \
       podman \
       netavark \
       aardvark-dns \
+      iptables \
       fuse-overlayfs \
       uidmap \
       slirp4netns \
@@ -168,7 +169,10 @@ RUN set -eux; \
     buildah --version; podman --version; \
     # netavark/aardvark-dns install as podman helpers under /usr/lib/podman,
     # not on PATH — verify them there (podman's default helper_binaries_dir).
-    /usr/lib/podman/netavark --version; test -x /usr/lib/podman/aardvark-dns
+    # iptables is REQUIRED: netavark 1.4's default firewall driver shells out to
+    # it to set up the rootless bridge NAT; without it `podman run` on a bridge
+    # network dies "netavark: No such file or directory (os error 2)".
+    /usr/lib/podman/netavark --version; test -x /usr/lib/podman/aardvark-dns; iptables --version
 
 # Compose provider for `podman compose` — pinned + checksum-verified against the
 # release's published .sha256 asset.
