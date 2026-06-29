@@ -32,6 +32,17 @@ apt-get install -y --no-install-recommends \
 # sudo is required by 02-stage-runners.sh (per-user setup) + register-runner.sh;
 # a minimal Debian image may not ship it.
 
+# --- host registries: resolve unqualified short names --------------------
+# Debian ships registries.conf with NO unqualified-search-registries, so a
+# host-native `buildah build` / `podman pull` of a short name (e.g. `alpine`)
+# fails to resolve. Default the search to docker.io for host-native image jobs
+# (issue: bare-metal buildah builds). Fully-qualified refs are unaffected.
+log "registries: unqualified-search = docker.io"
+mkdir -p /etc/containers/registries.conf.d
+cat > /etc/containers/registries.conf.d/10-unqualified-search.conf <<'EOF'
+unqualified-search-registries = ["docker.io"]
+EOF
+
 # --- verify the rootless container toolchain is wired up ------------------
 log "verify netavark + aardvark-dns are discoverable by podman"
 # On Debian they live under /usr/lib/podman; podman expects them there.
