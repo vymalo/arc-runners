@@ -193,6 +193,27 @@ need the baked toolchain (Rust/Flutter/Node) — and split those from the image
 build into separate jobs. Fully-qualify image refs (`public.ecr.aws/docker/library/postgres`)
 since the host defines no unqualified-search registries.
 
+## Persistent-runner credential hygiene
+
+These runners are persistent, not ephemeral, so registry logins leak between
+jobs. A job that runs `buildah login` / `docker login ghcr.io` (image-push jobs)
+leaves a credential in the runner user's auth files; its `GITHUB_TOKEN` expires
+when the job ends, and the next `container:` job's pull then reuses that stale
+token and gets **`403 Forbidden`** from ghcr instead of pulling a public image
+anonymously.
+
+`job-completed-cleanup.sh` (wired via `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in each
+runner's `.env`) wipes `~/.docker/config.json` + `containers/auth.json` after
+every job, so each job starts clean. Symptom if this ever regresses:
+`Requesting bearer token: invalid status code from registry 403 (Forbidden)` at
+"Initialize containers", even though the image is public and pulls anonymously
+elsewhere. Manual clear: `rm -f ~runner-N/.docker/config.json
+/run/user/<uid>/containers/auth.json`.
+
+Corollary: do **not** add `container.credentials` for pulling the public
+arc-runners image — a repo-scoped `GITHUB_TOKEN` can't pull a cross-repo package
+and will 403. Let `container:` pull it anonymously.
+
 ## Operating
 
 ```bash

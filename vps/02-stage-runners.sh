@@ -123,6 +123,7 @@ for i in $(seq 1 "$NUM_RUNNERS"); do
 XDG_RUNTIME_DIR=${RTD}
 DOCKER_HOST=unix:///var/run/docker.sock
 DOCKER_BUILDKIT=0
+ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/runners-bootstrap/job-completed-cleanup.sh
 EOF
   # 0600: the .env is the conventional place secrets get added later; keep it
   # owner-only from the start rather than relying on the caller's umask.
