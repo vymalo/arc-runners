@@ -214,6 +214,28 @@ Corollary: do **not** add `container.credentials` for pulling the public
 arc-runners image — a repo-scoped `GITHUB_TOKEN` can't pull a cross-repo package
 and will 403. Let `container:` pull it anonymously.
 
+## Disk / image cleanup
+
+Persistent runners accumulate pulled base images and `buildah --layers` cache.
+`podman-prune.timer` runs `podman-prune.sh` daily (~04:30, randomized):
+
+- **Light prune always** — dangling images, stopped containers, build cache
+  older than `PRUNE_KEEP_HOURS` (default 168h/7d). The age filter keeps the hot
+  arc-runners base image + recent build cache, so normal builds stay fast.
+- **Full prune only under disk pressure** — if the storage FS is ≥
+  `PRUNE_DISK_PCT` (default 75%), also drops all unused images + volumes.
+
+Safe to run during jobs (prune only removes *unused* resources). Tune via the
+env vars on the service, or run on demand:
+
+```bash
+systemctl start podman-prune.service        # run now
+journalctl -u podman-prune.service -n 20     # see what it reclaimed
+systemctl list-timers podman-prune.timer     # next scheduled run
+# per-runner storage usage:
+sudo -u runner-1 XDG_RUNTIME_DIR=/run/user/1000 podman system df
+```
+
 ## Operating
 
 ```bash

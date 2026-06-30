@@ -124,7 +124,36 @@ Before=slices.target
 # Soft umbrella; hard per-runner caps are set on each runner service.
 # Keeps all runners in one visible cgroup subtree: systemctl status runners.slice
 EOF
+
+# --- periodic container-storage prune ------------------------------------
+# Persistent runners accumulate pulled base images + buildah --layers cache.
+# A daily timer reclaims stale storage (full prune only under disk pressure).
+log "podman-prune timer (reclaim rootless image storage)"
+cat > /etc/systemd/system/podman-prune.service <<'EOF'
+[Unit]
+Description=Prune rootless container storage on the GitHub runner host
+
+[Service]
+Type=oneshot
+ExecStart=/opt/runners-bootstrap/podman-prune.sh
+Nice=10
+IOSchedulingClass=idle
+EOF
+cat > /etc/systemd/system/podman-prune.timer <<'EOF'
+[Unit]
+Description=Daily rootless container storage prune
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
+systemctl enable --now podman-prune.timer >/dev/null 2>&1 || true
 
 log "host provisioning complete"
 podman --version
