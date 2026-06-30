@@ -46,9 +46,11 @@ fi
 [[ -n "$token" ]] || { echo "no token provided (set RUNNER_TOKEN or enter when prompted)" >&2; exit 1; }
 
 echo "==> configuring ${NAME} as user ${USER}"
-# Token is handed to the child via the environment (env is owner/root-readable
-# only — unlike argv), and config flags via positional args ($1..$4).
-sudo -u "$USER" RUNNER_TOKEN="$token" bash -s -- "$RUN_DIR" "$URL" "$NAME" "$LABELS" <<'INNER'
+# Hand the token to the child via the EXPORTED environment + sudo --preserve-env,
+# NOT as `sudo VAR=val` (which would put the token in sudo's own argv, visible in
+# /proc/<pid>/cmdline). config flags go via positional args ($1..$4).
+export RUNNER_TOKEN="$token"
+sudo -u "$USER" --preserve-env=RUNNER_TOKEN bash -s -- "$RUN_DIR" "$URL" "$NAME" "$LABELS" <<'INNER'
 cd "$1" && ./config.sh \
   --url "$2" \
   --token "$RUNNER_TOKEN" \
@@ -58,23 +60,32 @@ cd "$1" && ./config.sh \
   --unattended --replace
 INNER
 
-# Re-extract svc.sh from the immutable root-owned cache before running it as
-# root, so a job that tampered with the (runner-owned) tree can't get a doctored
-# svc.sh executed with root privileges.
-echo "==> refreshing root-run svc.sh from cache"
-cache=(/opt/actions-runner-cache/actions-runner-linux-x64-*.tar.gz)
-if [[ -f "${cache[0]}" ]]; then
-  tar -xzf "${cache[0]}" -C "$RUN_DIR" ./svc.sh
-  chown root:root "${RUN_DIR}/svc.sh"
+# Take the tree root-owned for the privileged install: this closes the TOCTOU
+# window where a concurrent (compromised) runner-user process could swap svc.sh
+# or its helpers between extraction and root execution. Restored to the runner
+# user on exit (even on failure) so the service can run as that user.
+echo "==> refreshing root-run svc.sh from cache + installing service"
+restore_owner() { chown -R "${USER}:${USER}" "$RUN_DIR"; }
+trap restore_owner EXIT
+chown -R root:root "$RUN_DIR"
+
+# Re-extract svc.sh from the immutable root-owned cache so the root-executed
+# helper is pristine. Pick the HIGHEST-version tarball (matches what staging
+# installed — the staging script always fetches latest), not the lexicographic
+# first, in case multiple releases are cached.
+cache="$(ls -1 /opt/actions-runner-cache/actions-runner-linux-x64-*.tar.gz 2>/dev/null | sort -V | tail -1)"
+if [[ -n "$cache" ]]; then
+  tar -xzf "$cache" -C "$RUN_DIR" ./svc.sh
   chmod 0755 "${RUN_DIR}/svc.sh"
 else
   echo "   (cache tarball not found — using on-disk svc.sh; ensure it's untampered)" >&2
 fi
 
-echo "==> installing + starting service"
 cd "$RUN_DIR"
 ./svc.sh install "$USER"
-systemctl daemon-reload          # ensure the pre-staged resource drop-in binds
+restore_owner            # hand the tree back before starting (service runs as $USER)
+trap - EXIT
+systemctl daemon-reload  # ensure the pre-staged resource drop-in binds
 ./svc.sh start
 
 echo "==> status"

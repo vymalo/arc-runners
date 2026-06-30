@@ -17,10 +17,11 @@ set +e
 uid="$(id -u)"
 rtd="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
 
-rm -f \
+# Guard each base path so an empty HOME/rtd can't turn into a root-relative rm.
+[[ -n "${HOME:-}" ]] && rm -f \
   "${HOME}/.docker/config.json" \
-  "${HOME}/.config/containers/auth.json" \
-  "${rtd}/containers/auth.json"
+  "${HOME}/.config/containers/auth.json"
+[[ -n "${rtd:-}" ]] && rm -f "${rtd}/containers/auth.json"
 
 # Never fail the job on cleanup trouble.
 exit 0

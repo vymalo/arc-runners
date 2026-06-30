@@ -9,6 +9,14 @@ log() { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 
 if [[ $EUID -ne 0 ]]; then echo "must run as root" >&2; exit 1; fi
 
+# Make the bootstrap dir traversable and its helper scripts executable,
+# regardless of how they were copied here (a strict scp/cp umask can drop +x).
+# job-completed-cleanup.sh is exec'd by unprivileged runner users (the runner
+# hook); podman-prune.sh is the timer's ExecStart.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+chmod 0755 "$SELF_DIR"
+chmod 0755 "$SELF_DIR"/*.sh 2>/dev/null || true
+
 export DEBIAN_FRONTEND=noninteractive
 
 log "apt update + base packages"

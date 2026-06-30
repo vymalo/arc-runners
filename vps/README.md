@@ -9,9 +9,12 @@ hard-capped by systemd to its own slice of the machine.
 > (`Dockerfile`), which runs runners in Kubernetes. These scripts provision
 > *native* `./svc.sh`-managed runners on a single Debian 13 host.
 >
-> **Deploy:** copy this directory to the box and run as root, in order:
+> **Deploy:** copy this directory's *contents* to the box and run as root, in
+> order. (Use rsync with a trailing slash, or `scp vps/*` — `scp -r vps/ dest`
+> would nest into `dest/vps/` if `dest` already exists.)
 > ```bash
-> scp -r vps/ root@<host>:/opt/runners-bootstrap
+> ssh root@<host> 'mkdir -p /opt/runners-bootstrap'
+> rsync -a vps/ root@<host>:/opt/runners-bootstrap/      # trailing slashes matter
 > ssh root@<host> 'bash /opt/runners-bootstrap/01-provision-host.sh \
 >                  && bash /opt/runners-bootstrap/02-stage-runners.sh'
 > ```
@@ -259,15 +262,15 @@ systemctl start actions.runner.vymalo.vps-runner-1.service
 
 ### Removing a runner
 
-`<REMOVE_TOKEN>` is a fresh short-lived registration token — generate one from
-the **same** page used to add runners
-(<https://github.com/organizations/vymalo/settings/actions/runners/new>); it
-works for removal too.
+`./config.sh remove` needs a **remove token**, which is a *different*
+short-lived token from the registration (add) token — mint it from the org
+remove-token API (not the `runners/new` page):
 
 ```bash
+REMOVE_TOKEN=$(gh api -X POST /orgs/vymalo/actions/runners/remove-token --jq .token)
 cd /home/runner-1/actions-runner
 sudo ./svc.sh stop && sudo ./svc.sh uninstall
-sudo -u runner-1 bash -c "cd ~/actions-runner && ./config.sh remove --token <REMOVE_TOKEN>"
+sudo -u runner-1 bash -c "cd ~/actions-runner && ./config.sh remove --token $REMOVE_TOKEN"
 ```
 
 ## Re-running the bootstrap

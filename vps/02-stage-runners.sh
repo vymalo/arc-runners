@@ -70,14 +70,15 @@ for i in $(seq 1 "$NUM_RUNNERS"); do
   UID_N="$(id -u "$USER")"
 
   # --- non-overlapping subuid/subgid ranges for rootless podman ---------
+  # Debian's useradd auto-allocates a subuid/subgid range, which would make a
+  # plain "if not present" check skip our own and silently use the auto range.
+  # Delete any existing line first so the configured SUBID_BASE/SIZE is strictly
+  # enforced (idempotent — re-running rewrites the same range).
   start=$(( SUBID_BASE + (i - 1) * SUBID_SIZE ))
   range="${start}-$(( start + SUBID_SIZE - 1 ))"
-  if ! grep -q "^${USER}:" /etc/subuid; then
-    usermod --add-subuids "$range" "$USER"
-  fi
-  if ! grep -q "^${USER}:" /etc/subgid; then
-    usermod --add-subgids "$range" "$USER"
-  fi
+  sed -i "/^${USER}:/d" /etc/subuid /etc/subgid 2>/dev/null || true
+  usermod --add-subuids "$range" "$USER"
+  usermod --add-subgids "$range" "$USER"
 
   # --- linger so /run/user/<uid> + user systemd exist at boot -----------
   loginctl enable-linger "$USER"
