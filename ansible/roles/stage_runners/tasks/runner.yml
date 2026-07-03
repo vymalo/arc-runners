@@ -64,7 +64,13 @@
 # Extract + install OS deps while the tree is still ROOT-OWNED, before handing it
 # to the unprivileged user (a job running as that user could otherwise rewrite
 # installdependencies.sh, which this play runs as root). Deps run once, on fresh
-# extract only.
+# extract only. Skip the root-own step entirely once already staged (config.sh
+# present) — otherwise every converge briefly flips a LIVE runner's directory to
+# root:root and back for no reason (the extract below is a no-op anyway).
+- name: "{{ r_user }} — check whether already staged"
+  ansible.builtin.stat:
+    path: "{{ r_run_dir }}/config.sh"
+  register: r_configsh_stat
 - name: "{{ r_user }} — runner dir (root-owned for staging)"
   ansible.builtin.file:
     path: "{{ r_run_dir }}"
@@ -72,6 +78,7 @@
     owner: root
     group: root
     mode: "0755"
+  when: not r_configsh_stat.stat.exists
 # Extract on FRESH install only (creates: config.sh). Deliberately NOT re-extracting
 # on a runner_version bump: the actions-runner SELF-UPDATES at runtime (it downloads
 # whatever version GitHub requires when it connects), so the on-disk version already
