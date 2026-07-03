@@ -1,0 +1,126 @@
+---
+# Per-runner staging. `idx` is provided by the include loop in main.yml.
+- name: "runner-{{ idx }} — derive facts"
+  ansible.builtin.set_fact:
+    r_user: "{{ runner_user_prefix }}-{{ idx }}"
+    r_name: "{{ runner_name_prefix }}-{{ idx }}"
+    r_uid: "{{ runner_base_uid + idx - 1 }}"
+    r_run_dir: "/home/{{ runner_user_prefix }}-{{ idx }}/actions-runner"
+    r_rtd: "/run/user/{{ runner_base_uid + idx - 1 }}"
+    r_subid_start: "{{ subid_base + (idx - 1) * subid_size }}"
+
+- name: "{{ r_user }} — user (deterministic uid, supplementary runners group)"
+  ansible.builtin.user:
+    name: "{{ r_user }}"
+    uid: "{{ r_uid }}"
+    groups: [runners]
+    append: true
+    create_home: true
+    shell: /bin/bash
+
+# Non-overlapping subuid/subgid ranges for rootless podman. lineinfile with a
+# regexp replaces in place — strictly enforcing our range (the shell had to
+# `sed -d` first because useradd auto-allocates one).
+- name: "{{ r_user }} — subuid range"
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: "^{{ r_user }}:"
+    line: "{{ r_user }}:{{ r_subid_start }}:{{ subid_size }}"
+    create: true
+    mode: "0644"
+- name: "{{ r_user }} — subgid range"
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: "^{{ r_user }}:"
+    line: "{{ r_user }}:{{ r_subid_start }}:{{ subid_size }}"
+    create: true
+    mode: "0644"
+
+# Linger so /run/user/<uid> + the user systemd manager exist at boot.
+- name: "{{ r_user }} — enable linger"
+  ansible.builtin.command: "loginctl enable-linger {{ r_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ r_user }}"
+
+- name: "{{ r_user }} — wait for the user runtime dir"
+  ansible.builtin.wait_for:
+    path: "{{ r_rtd }}"
+    timeout: 15
+
+# Initialise rootless podman + enable the docker-compat socket, as the user.
+- name: "{{ r_user }} — enable rootless podman.socket"
+  become: true
+  become_user: "{{ r_user }}"
+  ansible.builtin.systemd:
+    name: podman.socket
+    scope: user
+    enabled: true
+    state: started
+  environment:
+    XDG_RUNTIME_DIR: "{{ r_rtd }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ r_rtd }}/bus"
+
+# Extract + install OS deps while the tree is still ROOT-OWNED, before handing it
+# to the unprivileged user (a job running as that user could otherwise rewrite
+# installdependencies.sh, which this play runs as root). Deps run once, on fresh
+# extract only.
+- name: "{{ r_user }} — runner dir (root-owned for staging)"
+  ansible.builtin.file:
+    path: "{{ r_run_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: "{{ r_user }} — extract actions-runner"
+  ansible.builtin.unarchive:
+    src: "{{ runner_cache_dir }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
+    dest: "{{ r_run_dir }}"
+    remote_src: true
+    creates: "{{ r_run_dir }}/config.sh"
+  register: r_extract
+- name: "{{ r_user }} — install runner OS deps (once, while root-owned)"
+  ansible.builtin.command: "{{ r_run_dir }}/bin/installdependencies.sh"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: r_extract is changed
+- name: "{{ r_user }} — hand the tree to the runner user"
+  ansible.builtin.file:
+    path: "{{ r_run_dir }}"
+    owner: "{{ r_user }}"
+    group: "{{ r_user }}"
+    recurse: true
+
+# .env: docker-compat socket + the post-job auth-cleanup hook. 0600, owner-only.
+- name: "{{ r_user }} — runner .env"
+  ansible.builtin.template:
+    src: runner.env.j2
+    dest: "{{ r_run_dir }}/.env"
+    owner: "{{ r_user }}"
+    group: "{{ r_user }}"
+    mode: "0600"
+
+# Pre-stage the systemd resource caps. The unit svc.sh creates is
+# actions.runner.<org>.<name>.service; this drop-in exists ahead of it.
+- name: "{{ r_user }} — agent drop-in dir"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service.d"
+    state: directory
+    mode: "0755"
+- name: "{{ r_user }} — agent resource cap (10-resources.conf)"
+  ansible.builtin.template:
+    src: 10-resources.conf.j2
+    dest: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service.d/10-resources.conf"
+    mode: "0644"
+  notify: Reload systemd
+
+- name: "{{ r_user }} — user slice cap dir"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/user-{{ r_uid }}.slice.d"
+    state: directory
+    mode: "0755"
+- name: "{{ r_user }} — user slice cap (10-runner-cap.conf)"
+  ansible.builtin.template:
+    src: 10-runner-cap.conf.j2
+    dest: "/etc/systemd/system/user-{{ r_uid }}.slice.d/10-runner-cap.conf"
+    mode: "0644"
+  notify: Reload systemd
