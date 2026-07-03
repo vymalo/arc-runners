@@ -3,6 +3,15 @@
 # tree, and write the systemd resource drop-ins. Mirror of vps/02-stage-runners.sh.
 # Does NOT register to GitHub (needs a token — see the register_runner role).
 
+# Ensure the runners group exists here too (provision_host also creates it), so
+# this role is self-contained when run standalone via --tags stage.
+- name: Ensure the runners group exists
+  ansible.builtin.group:
+    name: runners
+    state: present
+
+# Resolve the latest release only when runner_version isn't pinned (set it in
+# group_vars or -e to skip the API call — offline / reproducible builds).
 - name: Resolve latest actions/runner release
   ansible.builtin.uri:
     url: https://api.github.com/repos/actions/runner/releases/latest
@@ -13,10 +22,12 @@
          if lookup('env', 'GITHUB_TOKEN') else {} }}
   register: runner_release
   check_mode: false
+  when: runner_version is not defined
 
 - name: Set runner version
   ansible.builtin.set_fact:
     runner_version: "{{ runner_release.json.tag_name | regex_replace('^v', '') }}"
+  when: runner_version is not defined
 
 - name: Runner tarball cache dir
   ansible.builtin.file:
