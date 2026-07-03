@@ -35,7 +35,9 @@ warnings=()   # collected WARN lines for this pass (also drives the webhook)
 
 log() { logger -t runner-health -p "daemon.${1}" -- "${2}" 2>/dev/null || true; }
 
-# float ">=" without bc: awk exits 0 when a>=b
+# float ">=" via awk. Kept intentionally over a pure-bash scaling trick: the latter
+# breaks on a non-integer PSI_WARN (e.g. "20.5"), and fge runs only ~6x per 2-min
+# tick, so the fork cost is negligible. awk exits 0 when a>=b.
 fge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>=b)}'; }
 
 # check_cgroup <label> <cgroup-abs-path>
@@ -43,23 +45,34 @@ check_cgroup() {
   local label="$1" cg="$2"
   [[ -d "$cg" ]] || return 0
 
-  # --- memory PSI (avg60 of "some") -------------------------------------
-  local psi=0
+  # --- memory PSI (avg60 of "some") — pure-bash parse, no fork -----------
+  local psi=0 line
   if [[ -r "$cg/memory.pressure" ]]; then
-    psi="$(awk '/^some /{for(i=1;i<=NF;i++){if($i ~ /^avg60=/){sub(/avg60=/,"",$i);print $i;exit}}}' \
-      "$cg/memory.pressure" 2>/dev/null)"
+    while read -r line; do
+      if [[ "$line" == some* ]]; then
+        psi="${line##*avg60=}"; psi="${psi%% *}"
+        break
+      fi
+    done < "$cg/memory.pressure"
     psi="${psi:-0}"
   fi
 
   # --- OOM-kill delta since last pass -----------------------------------
-  local oomk=0 last=0 delta=0
+  local oomk=0 last=0 delta=0 ev_name ev_val
   if [[ -r "$cg/memory.events" ]]; then
-    oomk="$(awk '/^oom_kill /{print $2}' "$cg/memory.events" 2>/dev/null)"
+    while read -r ev_name ev_val; do
+      [[ "$ev_name" == oom_kill ]] && { oomk="$ev_val"; break; }
+    done < "$cg/memory.events"
     oomk="${oomk:-0}"
   fi
-  local statef
-  statef="$STATE_DIR/$(echo "$label" | tr -c 'A-Za-z0-9_.-' '_').oomk"
-  [[ -r "$statef" ]] && last="$(cat "$statef" 2>/dev/null || echo 0)"
+  local statef safe_label last_raw
+  safe_label="${label//[^A-Za-z0-9_.-]/_}"
+  statef="$STATE_DIR/${safe_label}.oomk"
+  # Validate: a truncated/garbage state file must not blow up the arithmetic below.
+  if [[ -r "$statef" ]]; then
+    last_raw="$(< "$statef")"
+    [[ "$last_raw" =~ ^[0-9]+$ ]] && last="$last_raw"
+  fi
   # oom_kill only grows within a boot; on reboot the cgroup counter resets to 0
   # and so does tmpfs state, so a plain delta is correct.
   delta=$(( oomk - last ))
@@ -67,14 +80,18 @@ check_cgroup() {
   echo "$oomk" > "$statef"
 
   # --- D-state tasks in this cgroup -------------------------------------
-  local dcount=0 pid st
-  if [[ -r "$cg/cgroup.procs" ]]; then
-    while read -r pid; do
-      [[ -r "/proc/$pid/stat" ]] || continue
-      # field 3 of /proc/pid/stat is the state char; guard comms with spaces/()
-      st="$(awk '{s=$0; sub(/^[0-9]+ \(.*\) /,"",s); print substr(s,1,1)}' "/proc/$pid/stat" 2>/dev/null)"
-      [[ "$st" == "D" ]] && dcount=$(( dcount + 1 ))
-    done < "$cg/cgroup.procs"
+  # Iterate THREADS, not just TGIDs: a multithreaded process (buildah/podman/.NET)
+  # can have a worker thread wedged in D while its leader is in interruptible sleep,
+  # which cgroup.procs (leaders only) would miss. Pure-bash stat parse, no fork:
+  # strip up to the last ')' (comm may contain spaces/parens), then take the state.
+  local dcount=0 tid sline st
+  if [[ -r "$cg/cgroup.threads" ]]; then
+    while read -r tid; do
+      if read -r sline < "/proc/$tid/stat" 2>/dev/null; then
+        st="${sline##*)}"; st="${st:1:1}"
+        [[ "$st" == "D" ]] && dcount=$(( dcount + 1 ))
+      fi
+    done < "$cg/cgroup.threads"
   fi
 
   # --- verdict ----------------------------------------------------------
@@ -97,7 +114,7 @@ check_cgroup() {
 # ---- sweep every runner: agent service cgroup + its user slice -----------
 shopt -s nullglob
 for svc_cg in "$CG_ROOT"/runners.slice/actions.runner.*.service; do
-  svc="$(basename "$svc_cg")"
+  svc="${svc_cg##*/}"
   check_cgroup "agent:${svc#actions.runner.}" "$svc_cg"
   # map the service to its user slice via the unit's User=
   user="$(systemctl show -p User --value "$svc" 2>/dev/null || true)"
@@ -109,11 +126,15 @@ done
 
 # ---- optional webhook on any WARN ----------------------------------------
 if (( ${#warnings[@]} > 0 )) && [[ -n "$WEBHOOK_URL" ]]; then
-  # best-effort; a down webhook must never fail the monitor. jq-free JSON: join
-  # the warnings into one text field with escaped quotes/newlines.
-  body="$(printf '%s\n' "${warnings[@]}" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"}{print}')"
+  # best-effort; a down webhook must never fail the monitor. jq-free JSON escaping
+  # in pure bash: escape backslashes then quotes per line, join with literal \n.
+  body=""
+  for w in "${warnings[@]}"; do
+    w="${w//\\/\\\\}"; w="${w//\"/\\\"}"
+    body="${body:+${body}\\n}${w}"
+  done
   curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
-    -d "{\"text\":\"[runner-health] $(hostname): ${body}\"}" \
+    -d "{\"text\":\"[runner-health] ${HOSTNAME:-$(hostname)}: ${body}\"}" \
     "$WEBHOOK_URL" >/dev/null 2>&1 || log warning "webhook POST failed"
 fi
 
