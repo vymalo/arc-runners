@@ -49,9 +49,8 @@ improvement over the shell's reliance on `useradd` allocation order.
 
 ## Dependencies / caveats
 
-- **Requires arc-runners#9 merged.** `provision_host` copies helper scripts from
-  `../vps/`, including `runner-health-watch.sh`, which #9 adds. A `--check` will
-  fail on the missing file until #9 lands.
+- `provision_host` copies helper scripts (incl. `runner-health-watch.sh`) from
+  `../vps/`, the single source of truth during coexistence.
 - Collections: `ansible.posix` (for `mount`). Everything else is `ansible.builtin`.
 - A few steps use `command`/`shell` where no native module fits (`loginctl
   enable-linger` with a `creates:` guard, `config.sh`, `svc.sh install`) — each is
@@ -70,8 +69,6 @@ improvement over the shell's reliance on `useradd` allocation order.
 
 ## Known follow-ups
 
-- Port `register-runner.sh`'s TOCTOU hardening (root-own the tree + re-extract
-  `svc.sh` from the immutable cache across `svc.sh install`).
 - Move helper scripts into `roles/*/files/` so `ansible/` is self-contained and
   `vps/` can be deleted.
 - `ansible-vault` for the registration token if it's ever stored rather than passed.

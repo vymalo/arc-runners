@@ -34,9 +34,19 @@
     msg: "runner {{ runner_index }} is not staged — run the stage_runners role first"
   when: not r_cfg.stat.exists
 
-# Token goes via the ENVIRONMENT and is referenced as $RUNNER_TOKEN in the
-# command, so it never lands in argv / /proc/<pid>/cmdline (visible to the other
-# runner users' jobs). no_log keeps it out of Ansible output too.
+# Idempotency + re-register safety: skip (re)configuration once the service unit
+# exists. Re-running config.sh on an already-registered runner with an
+# expired/absent token would fail; force a re-register by removing the service first.
+- name: Check whether the runner service is already installed
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service"
+  register: r_service_stat
+
+# Token goes via the ENVIRONMENT and is referenced as $RUNNER_TOKEN in the command,
+# so it never lands in argv / /proc/<pid>/cmdline (visible to the other runner
+# users' jobs). no_log keeps it out of Ansible output. HOME is set explicitly:
+# become_user does NOT reset HOME (it stays /root), so config.sh/dotnet would try
+# to write dotfiles under /root and hit EACCES as the unprivileged user.
 - name: Configure the runner
   become: true
   become_user: "{{ r_user }}"
@@ -48,18 +58,47 @@
       --work _work --unattended --replace
   environment:
     RUNNER_TOKEN: "{{ runner_token }}"
+    HOME: "/home/{{ r_user }}"
   no_log: true
   register: r_configure
   changed_when: "'Settings Saved' in r_configure.stdout or 'successfully' in r_configure.stdout"
+  when: not r_service_stat.stat.exists
 
-# NOTE: vps/register-runner.sh additionally re-extracts svc.sh from the immutable
-# root-owned cache and root-owns the tree across the install to close a TOCTOU
-# window. Porting that hardening faithfully is a follow-up (see ansible/README.md).
-- name: Install the runner service
-  ansible.builtin.command:
-    chdir: "{{ r_run_dir }}"
-    cmd: "./svc.sh install {{ r_user }}"
-    creates: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service"
+# Install the service with the tree ROOT-OWNED and svc.sh re-extracted pristine from
+# the immutable cache — closing the TOCTOU window where a compromised runner user
+# could swap svc.sh before this root execution (ports vps/register-runner.sh). The
+# `always` restores ownership even on failure, so the service can run as the user.
+- name: Install the runner service (hardened)
+  when: not r_service_stat.stat.exists
+  block:
+    - name: Locate the newest cached runner tarball
+      ansible.builtin.shell: "set -o pipefail; ls -1 {{ runner_cache_dir }}/actions-runner-linux-x64-*.tar.gz | sort -V | tail -1"
+      args: { executable: /bin/bash }
+      register: r_cache_tarball
+      changed_when: false
+    - name: Root-own the runner tree (close TOCTOU window)
+      ansible.builtin.file:
+        path: "{{ r_run_dir }}"
+        owner: root
+        group: root
+        recurse: true
+    - name: Re-extract a pristine svc.sh from the cache
+      ansible.builtin.unarchive:
+        src: "{{ r_cache_tarball.stdout }}"
+        dest: "{{ r_run_dir }}"
+        remote_src: true
+        include: ["./svc.sh"]
+    - name: Install the service (root, pristine svc.sh)
+      ansible.builtin.command:
+        chdir: "{{ r_run_dir }}"
+        cmd: "./svc.sh install {{ r_user }}"
+  always:
+    - name: Restore runner-tree ownership to the runner user
+      ansible.builtin.file:
+        path: "{{ r_run_dir }}"
+        owner: "{{ r_user }}"
+        group: "{{ r_user }}"
+        recurse: true
 
 - name: Reload systemd (bind the pre-staged resource drop-in)
   ansible.builtin.systemd:
