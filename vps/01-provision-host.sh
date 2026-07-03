@@ -12,7 +12,7 @@ if [[ $EUID -ne 0 ]]; then echo "must run as root" >&2; exit 1; fi
 # Make the bootstrap dir traversable and its helper scripts executable,
 # regardless of how they were copied here (a strict scp/cp umask can drop +x).
 # job-completed-cleanup.sh is exec'd by unprivileged runner users (the runner
-# hook); podman-prune.sh is the timer's ExecStart.
+# hook); podman-prune.sh and runner-health-watch.sh are timer ExecStarts.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chmod 0755 "$SELF_DIR"
 chmod 0755 "$SELF_DIR"/*.sh 2>/dev/null || true
@@ -162,6 +162,38 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now podman-prune.timer >/dev/null 2>&1 || true
+
+# --- runner health watchdog ----------------------------------------------
+# Detect a wedged / memory-starved runner early (memory PSI + oom_kill delta +
+# D-state tasks) so a stuck job surfaces in minutes, not after hours. Read-only —
+# it reports (journal WARN + optional webhook), never kills. See the 2026-07-02
+# ~19h wedge (arc-runners#8); MemorySwapMax=0 prevents the wedge, this catches
+# the pressure/OOM symptoms that precede or replace it.
+log "runner-health-watch timer (early wedge/starvation detection)"
+cat > /etc/systemd/system/runner-health-watch.service <<'EOF'
+[Unit]
+Description=Detect wedged/memory-starved GitHub runner cgroups (report-only)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/runners-bootstrap/runner-health-watch.sh
+Nice=10
+EOF
+cat > /etc/systemd/system/runner-health-watch.timer <<'EOF'
+[Unit]
+Description=Poll runner cgroup health every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now runner-health-watch.timer >/dev/null 2>&1 || true
 
 log "host provisioning complete"
 podman --version
