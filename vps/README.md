@@ -24,36 +24,46 @@ hard-capped by systemd to its own slice of the machine.
 
 | Runner       | OS user    | Install dir                     | CPU cap | RAM cap |
 |--------------|------------|---------------------------------|---------|---------|
-| vps-runner-1 | runner-1   | /home/runner-1/actions-runner   | 4 vCPU  | 10 GiB  |
-| vps-runner-2 | runner-2   | /home/runner-2/actions-runner   | 4 vCPU  | 10 GiB  |
-| vps-runner-3 | runner-3   | /home/runner-3/actions-runner   | 4 vCPU  | 10 GiB  |
+| vps-runner-1 | runner-1   | /home/runner-1/actions-runner   | 4 vCPU  | 9 GiB   |
+| vps-runner-2 | runner-2   | /home/runner-2/actions-runner   | 4 vCPU  | 9 GiB   |
+| vps-runner-3 | runner-3   | /home/runner-3/actions-runner   | 4 vCPU  | 9 GiB   |
 
 Host: 12 vCPU / 31 GiB. Caps are CPUQuota (ceiling, not reservation) so idle
-headroom is shared; memory is a hard `MemoryMax` (+2 GiB swap each, 8 GiB
-system swap as buffer).
+headroom is shared; memory is a hard `MemoryMax` with **no swap for job cgroups**
+(`MemorySwapMax=0`) so an over-cap build OOM-fails in seconds instead of thrashing
+swap into an unkillable multi-hour wedge (see arc-runners#8). The host keeps 8 GiB
+system swap as an OS buffer, but the runner cgroups cannot use it.
 
-**The cap is applied in two places** (this matters):
+**The cap is applied in two places, and which one a build hits depends on the job:**
 
-- `actions.runner.vymalo.vps-runner-N.service` — bounds the runner *agent*.
-- `user-<uid>.slice` — bounds everything the runner user runs, **including the
-  rootless build containers**. Container jobs are launched by the user's Podman
-  service under `user-<uid>.slice`, *not* under the runner service, so without a
-  cap there they would escape the limit and could consume the whole box.
+- `user-<uid>.slice` — bounds rootless build **containers**. `container:` jobs are
+  launched by the user's Podman service under this slice, *not* the runner service.
+- `actions.runner.vymalo.vps-runner-N.service` — bounds the runner *agent* **and
+  any HOST-NATIVE `buildah`/`podman` build** (a job with no `container:`, e.g. the
+  image-build jobs). Those run as a direct child of the agent, so their memory is
+  bounded here — *not* in the user slice. (Rootless podman falls back to
+  `cgroup-manager=cgroupfs`, so container cgroups nest under the caller.)
 
-These are **separate cgroups with independent quotas**, so a runner's true
-ceiling is the *sum*. The agent budget is kept deliberately small (it only
-orchestrates) so the headline number stays honest:
+These are **separate cgroups**, but the two heavy paths are **mutually exclusive**
+on a runner that runs one job at a time (a job is either host-native or
+containerised). So a runner's true ceiling is the *max*, not the sum:
 
 | cgroup | what runs there | CPU | RAM |
 |---|---|---|---|
-| `actions.runner.…service` (runners.slice) | runner agent | 100% | 1 GiB |
-| `user-<uid>.slice` | build + service containers | 400% | 9 GiB |
-| **per-runner total** | | ~5 vCPU ceiling | **10 GiB** |
+| `actions.runner.…service` (runners.slice) | runner agent + host-native builds | 100% | 6 GiB |
+| `user-<uid>.slice` | container builds + service containers | 400% | 9 GiB |
+| **per-runner peak** | (whichever path the job takes) | ~4 vCPU | **9 GiB** |
 
-3 × 10 GiB = 30 GiB ≤ 31 GiB host (CPU quotas are ceilings, freely
+3 × 9 GiB = 27 GiB ≤ 31 GiB host (CPU quotas are ceilings, freely
 oversubscribed). The agent service also carries `Restart=always` (the stock
 actions-runner unit sets none), so it self-heals if it loses the boot race
 against the user's `podman.socket`.
+
+A **health watchdog** (`runner-health-watch.timer`, every 2 min) reports — never
+kills — when a runner cgroup shows sustained memory PSI, a new OOM-kill, or a
+D-state task, so starvation/wedges surface in the journal (`journalctl -t
+runner-health`) in minutes rather than hours. Optional webhook via
+`/etc/runner-health-watch.env` (`WEBHOOK_URL=…`).
 
 Each runner runs as its own unprivileged user with its own subuid/subgid range
 and its own rootless Podman socket. A job in one runner cannot see or starve
@@ -286,12 +296,16 @@ both cgroups at once and is the recommended path. To tune live, remember there
 are **two** cgroups: the user slice bounds the real workload, so don't forget it.
 
 ```bash
-# the workload (build containers) — the one that usually matters:
-sudo systemctl set-property user-$(id -u runner-1).slice CPUQuota=300% MemoryMax=7G
-# the agent (rarely needs changing):
+# container builds (user slice) — the path `container:` jobs take:
+sudo systemctl set-property user-$(id -u runner-1).slice CPUQuota=400% MemoryMax=9G
+# the agent slice — ALSO bounds host-native buildah builds, so size it for a real
+# image build (not just the orchestrator) and keep swap off:
 sudo systemctl set-property actions.runner.vymalo.vps-runner-1.service \
-  CPUQuota=100% MemoryMax=1G
+  CPUQuota=100% MemoryMax=6G MemorySwapMax=0
 ```
 
-Setting only the `actions.runner.…service` cap (as earlier docs showed) retunes
-just the agent — your build containers stay bounded by the old user-slice cap.
+Note both cgroups matter: `container:` jobs are bounded by the user slice, but
+HOST-NATIVE `buildah` builds (no `container:`) are bounded by the
+`actions.runner.…service` cap — retuning only one leaves the other path unchanged.
+`set-property` alone is not persisted the same way as the drop-ins — prefer editing
+`02-stage-runners.sh` and re-running for anything permanent.
