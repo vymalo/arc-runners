@@ -72,35 +72,25 @@
     owner: root
     group: root
     mode: "0755"
-# Track the staged version in a marker file so a bumped runner_version re-extracts
-# (a static `creates: config.sh` would pin the runner at its first-installed version
-# forever). The .runner/.credentials config lives outside the tarball, so a re-extract
-# refreshes binaries without disturbing registration.
-- name: "{{ r_user }} — read staged runner version"
-  ansible.builtin.slurp:
-    src: "{{ r_run_dir }}/.staged_version"
-  register: r_staged_raw
-  failed_when: false
-  changed_when: false
-- name: "{{ r_user }} — extract actions-runner (on first install or version bump)"
+# Extract on FRESH install only (creates: config.sh). Deliberately NOT re-extracting
+# on a runner_version bump: the actions-runner SELF-UPDATES at runtime (it downloads
+# whatever version GitHub requires when it connects), so the on-disk version already
+# drifts from the tarball. Force-re-extracting would (a) clobber a self-updated runner
+# with an older bootstrap and (b) — since a version marker can't exist on a host staged
+# out-of-band (the shell scripts never wrote one) — report as drift on every --check.
+# A clean rebuild (empty dir) still gets the latest via creates. [supersedes the
+# .staged_version marker from #11, which broke --check idempotency]
+- name: "{{ r_user }} — extract actions-runner (fresh install only)"
   ansible.builtin.unarchive:
     src: "{{ runner_cache_dir }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
     dest: "{{ r_run_dir }}"
     remote_src: true
+    creates: "{{ r_run_dir }}/config.sh"
   register: r_extract
-  when: (r_staged_raw.content | default('') | b64decode | trim) != runner_version
 - name: "{{ r_user }} — install runner OS deps (once, while root-owned)"
   ansible.builtin.command: "{{ r_run_dir }}/bin/installdependencies.sh"
   environment:
     DEBIAN_FRONTEND: noninteractive
-  when: r_extract is changed
-- name: "{{ r_user }} — record staged version"
-  ansible.builtin.copy:
-    dest: "{{ r_run_dir }}/.staged_version"
-    content: "{{ runner_version }}"
-    owner: root
-    group: root
-    mode: "0644"
   when: r_extract is changed
 # Base-dir ownership every run (cheap); recursive chown ONLY on a fresh extract —
 # _work grows to thousands of files, so a recurse every converge is heavy I/O.

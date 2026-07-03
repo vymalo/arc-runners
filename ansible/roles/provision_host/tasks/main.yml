@@ -70,24 +70,28 @@
 # ---- swap: OS buffer (heavy CI builds); cgroups run swap=0 and can't use it --
 - name: Check active swap
   ansible.builtin.command: swapon --show=NAME --noheadings
+  # Read-only command/shell tasks are SKIPPED under --check by default (no
+  # creates/removes guard), which leaves swap_show without .stdout and blows up
+  # the next task's `'/swapfile' not in swap_show.stdout` evaluation. Force it to
+  # always run — it has no side effects, so running it in check mode is safe.
+  check_mode: false
   changed_when: false
   register: swap_show
-- name: Check whether /swapfile already exists on disk
-  ansible.builtin.stat:
-    path: /swapfile
-  register: swapfile_stat
 
 - name: Create + enable /swapfile (0600 before allocation — never world-readable)
+  # This block runs ONLY when /swapfile is INACTIVE, so on the live host (swap
+  # already on) it's skipped entirely — no drift.
   when: "'/swapfile' not in swap_show.stdout"
   block:
     - ansible.builtin.command: "fallocate -l {{ host_swap_size_mb }}M /swapfile"
       args: { creates: /swapfile }
-      when: not swapfile_stat.stat.exists
     - ansible.builtin.file: { path: /swapfile, owner: root, group: root, mode: "0600" }
-    # Only format a brand-new file — never re-mkswap an existing (merely inactive)
-    # swapfile, which would reformat it and issue a fresh UUID.
+    # Always mkswap here: since we only reach this when /swapfile is inactive, a
+    # valid-but-inactive file and a half-created (interrupted fallocate) file both
+    # end up usable. fstab references the PATH, not the UUID, so a fresh UUID is
+    # irrelevant — simpler and more robust than a stat guard that would leave a
+    # partial file unformatted and then fail `swapon`. [supersedes #11's stat guard]
     - ansible.builtin.command: mkswap /swapfile
-      when: not swapfile_stat.stat.exists
       register: mkswap_run
       changed_when: "'Setting up swapspace' in mkswap_run.stdout"
     - ansible.builtin.command: swapon /swapfile
