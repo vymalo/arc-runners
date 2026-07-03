@@ -9,19 +9,37 @@
 set -euo pipefail
 
 # ---- config -------------------------------------------------------------
-# A runner's footprint is split across TWO cgroups: the agent (a system service
-# under runners.slice) and its build containers (under the user's slice). They
-# have independent quotas, so the per-runner ceiling is the SUM. Keep the agent
-# budget small (it only orchestrates) so the headline total stays honest:
-#   agent 1 GiB + containers 9 GiB = 10 GiB per runner  ×3 = 30 GiB ≤ 31 GiB host.
+# A runner's footprint is split across TWO cgroups: the agent service (under
+# runners.slice) and its build CONTAINERS (under user-<uid>.slice). Crucially,
+# these are used by MUTUALLY EXCLUSIVE job types on a runner that runs one job at
+# a time: a `container:` job's build lands in the user slice; a HOST-NATIVE job
+# (buildah invoked directly, e.g. `image (admin)`) lands in the agent cgroup. So
+# the per-runner ceiling is max(agent, container), NOT their sum:
+#   max(6 GiB agent, 9 GiB containers) = 9 GiB per runner  ×3 = 27 GiB ≤ 31 GiB.
+# Both caps run swap-free (MEM_SWAP_MAX=0) so an over-cap job OOM-fails fast
+# instead of swap-thrashing into an unkillable D-state wedge.
 NUM_RUNNERS=3
 CONTAINER_CPU_QUOTA="400%"   # 4 vCPU ceiling for the build workload (user slice)
 CONTAINER_MEM_MAX="9G"       # hard cap for build containers — the real workload
 CONTAINER_MEM_HIGH="8500M"   # soft throttle before the hard cap
 AGENT_CPU_QUOTA="100%"       # the .NET listener/worker does no heavy lifting
-AGENT_MEM_MAX="1G"
-AGENT_MEM_HIGH="768M"
-MEM_SWAP_MAX="2G"            # limited swap per cgroup under pressure
+# The agent cgroup is ALSO where HOST-NATIVE buildah/podman builds run (jobs with
+# no `container:` — e.g. the `image (admin)` job — invoke buildah as a direct
+# child of the runner service, so their memory lands here, NOT in user-<uid>.slice).
+# So this must fit a real image build, not just the .NET listener. 6G covers the
+# Medusa/Next admin build with headroom. Safe against the host total because a
+# runner runs ONE job at a time and the heavy path is mutually exclusive:
+# host-native build => agent cgroup; container build => user slice. Per-runner
+# peak ≈ max(6G agent, 9G container) = 9G, ×3 = 27G ≤ 31G host.
+AGENT_MEM_MAX="6G"
+AGENT_MEM_HIGH="5G"
+# NO swap for job cgroups. With swap, exceeding MemoryMax makes tasks thrash in
+# mem_cgroup_handle_over_limit (D-state, unkillable even by SIGKILL) and wedge the
+# host for hours. With swap=0, exceeding MemoryMax triggers an INSTANT cgroup
+# OOM-kill: the job fails in seconds and the runner self-recovers. Fail fast >
+# slow deadlock. (Incident 2026-07-03: a host-native build swap-thrashed the 1G
+# agent cap for ~19h before it was noticed.)
+MEM_SWAP_MAX="0"
 ORG="vymalo"   # runner labels are applied at registration — see register-runner.sh
 SUBID_SIZE=65536
 SUBID_BASE=100000
@@ -150,9 +168,13 @@ Wants=user@${UID_N}.service
 Restart=always
 RestartSec=5
 # --- resource bound for the runner AGENT process ---
-# NOTE: this caps only the .NET listener/worker (kept deliberately small — it
-# only orchestrates). Rootless build CONTAINERS run under user-<uid>.slice and
-# are capped separately below; the per-runner total is agent + container slice.
+# NOTE: this caps the .NET listener/worker AND any HOST-NATIVE buildah/podman
+# build (a `run:` step that shells out to buildah with no `container:` — the
+# `image (admin)`/migrate jobs). Those run as direct children of this service, so
+# their memory is bounded HERE, not in user-<uid>.slice. Sized (6G) for a real
+# image build; swap-free so an over-cap build OOM-fails fast, never wedges.
+# Container-based builds (via DOCKER_HOST) are bounded separately by the user
+# slice drop-in below.
 Slice=runners.slice
 CPUQuota=${AGENT_CPU_QUOTA}
 CPUWeight=100
