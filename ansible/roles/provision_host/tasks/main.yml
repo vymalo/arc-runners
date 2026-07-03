@@ -70,6 +70,11 @@
 # ---- swap: OS buffer (heavy CI builds); cgroups run swap=0 and can't use it --
 - name: Check active swap
   ansible.builtin.command: swapon --show=NAME --noheadings
+  # Read-only command/shell tasks are SKIPPED under --check by default (no
+  # creates/removes guard), which leaves swap_show without .stdout and blows up
+  # the next task's `'/swapfile' not in swap_show.stdout` evaluation. Force it to
+  # always run — it has no side effects, so running it in check mode is safe.
+  check_mode: false
   changed_when: false
   register: swap_show
 

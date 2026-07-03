@@ -77,6 +77,11 @@
     - name: Locate the newest cached runner tarball
       ansible.builtin.shell: "set -o pipefail; ls -1 {{ runner_cache_dir }}/actions-runner-linux-x64-*.tar.gz | sort -V | tail -1"
       args: { executable: /bin/bash }
+      # Read-only; without this, --check skips it and the next task's
+      # r_cache_tarball.stdout is undefined. Note this whole block is already
+      # gated `when: not r_service_stat.stat.exists`, so it only matters for a
+      # fresh (not-yet-installed) runner anyway.
+      check_mode: false
       register: r_cache_tarball
       changed_when: false
     - name: Root-own the runner tree (narrow the TOCTOU window)
