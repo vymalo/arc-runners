@@ -1,0 +1,186 @@
+---
+# Base host: package stack, registries, swap, sysctl, ulimits, the parent
+# runners.slice, and the two systemd timers. Mirror of vps/01-provision-host.sh.
+# Helper scripts are copied from the repo's vps/ dir (single source of truth
+# during coexistence) — NOTE: vps/runner-health-watch.sh is added by #9, so this
+# role expects #9 merged to main. Retire vps/ once this role is validated.
+
+- name: Base packages (rootless container stack + CI tooling)
+  ansible.builtin.apt:
+    name:
+      - podman
+      - buildah
+      - podman-docker
+      - podman-compose
+      - fuse-overlayfs
+      - crun
+      - catatonit
+      - slirp4netns
+      - passt
+      - uidmap
+      - netavark
+      - aardvark-dns
+      - dbus-user-session
+      - iptables
+      - sudo
+      - ca-certificates
+      - curl
+      - jq
+      - git
+      - tar
+      - gzip
+      - unzip
+      - xz-utils
+      - zstd
+      - acl
+      - unattended-upgrades
+      - apt-listchanges
+      - htop
+      - ncdu
+    state: present
+    update_cache: true
+    install_recommends: false
+
+# Debian ships NO unqualified-search-registries, so host-native `buildah build`
+# of a short name (e.g. `alpine`) fails to resolve. Default the search to docker.io.
+- name: Registries — default unqualified search to docker.io
+  ansible.builtin.copy:
+    dest: /etc/containers/registries.conf.d/10-unqualified-search.conf
+    content: |
+      unqualified-search-registries = ["docker.io"]
+    owner: root
+    group: root
+    mode: "0644"
+
+# netavark/aardvark-dns live under /usr/lib/podman on Debian; surface a warning
+# (not a failure) if podman won't find them, mirroring the script's check.
+- name: Verify netavark + aardvark-dns are where podman expects them
+  ansible.builtin.stat:
+    path: "/usr/lib/podman/{{ item }}"
+  loop: [netavark, aardvark-dns]
+  register: netavark_bins
+- name: Warn if a rootless-network helper is missing
+  ansible.builtin.debug:
+    msg: "WARN: {{ item.item }} not found at /usr/lib/podman — rootless compose DNS may break"
+  loop: "{{ netavark_bins.results }}"
+  loop_control: { label: "{{ item.item }}" }
+  when: not item.stat.exists
+
+# ---- swap: OS buffer (heavy CI builds); cgroups run swap=0 and can't use it --
+- name: Check for existing swapfile
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  changed_when: false
+  register: swap_show
+
+- name: Create /swapfile (0600 before allocation — never world-readable)
+  when: "'/swapfile' not in swap_show.stdout"
+  block:
+    - ansible.builtin.command: "fallocate -l {{ host_swap_size_mb }}M /swapfile"
+      args: { creates: /swapfile }
+    - ansible.builtin.file: { path: /swapfile, owner: root, group: root, mode: "0600" }
+    - ansible.builtin.command: mkswap /swapfile
+      register: mkswap_run
+      changed_when: "'Setting up swapspace' in mkswap_run.stdout"
+    - ansible.builtin.command: swapon /swapfile
+      changed_when: true
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    path: none
+    src: /swapfile
+    fstype: swap
+    opts: sw
+    state: present
+
+# ---- sysctl for CI workloads (inotify / map_count / sockets / userns) --------
+- name: sysctl tuning for CI workloads
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-ci-runners.conf
+    mode: "0644"
+    content: |
+      # File watchers — Flutter/Node/webpack/jest open a lot of them.
+      fs.inotify.max_user_watches = 524288
+      fs.inotify.max_user_instances = 1024
+      fs.inotify.max_queued_events = 32768
+      # Some toolchains (ES, sanitizers, large mmap) need a high map count.
+      vm.max_map_count = 262144
+      # Connection backlog for compose smoke tests / local servers.
+      net.core.somaxconn = 4096
+      # Plenty of user namespaces for rootless podman across runners.
+      user.max_user_namespaces = 280000
+  notify: Reload sysctl
+
+# ---- runners group + pam ulimits (keyed on the group, not usernames) ---------
+- name: Ensure the runners group exists
+  ansible.builtin.group: { name: runners, state: present }
+
+- name: PAM ulimits for the runners group
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/90-ci-runners.conf
+    mode: "0644"
+    content: |
+      @runners  soft  nofile  65536
+      @runners  hard  nofile  1048576
+      *  soft  nproc  32768
+      *  hard  nproc  65536
+
+- name: Unattended security upgrades (no auto-reboot)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+- name: Enable unattended-upgrades
+  ansible.builtin.systemd: { name: unattended-upgrades, enabled: true, state: started }
+
+# ---- bootstrap dir + helper scripts (timer ExecStarts + job hook) ------------
+- name: Bootstrap dir for helper scripts
+  ansible.builtin.file: { path: "{{ bootstrap_dir }}", state: directory, mode: "0755" }
+- name: Install helper scripts
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../vps/{{ item }}"
+    dest: "{{ bootstrap_dir }}/{{ item }}"
+    mode: "0755"
+  loop:
+    - podman-prune.sh
+    - job-completed-cleanup.sh
+    - runner-health-watch.sh   # added by arc-runners#9 — merge it before running this role
+
+# ---- systemd: parent slice + timers ------------------------------------------
+- name: Parent runners.slice (soft umbrella; hard caps are per-runner)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/runners.slice
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=GitHub Actions self-hosted runners (vymalo)
+      Before=slices.target
+
+      [Slice]
+      # Soft umbrella; hard per-runner caps are set on each runner service.
+      MemoryHigh=infinity
+      MemoryMax=infinity
+  notify: Reload systemd
+
+- name: Install timer units (podman-prune + runner-health-watch)
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - podman-prune.service
+    - podman-prune.timer
+    - runner-health-watch.service
+    - runner-health-watch.timer
+  notify: Reload systemd
+
+- name: Enable timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - podman-prune.timer
+    - runner-health-watch.timer

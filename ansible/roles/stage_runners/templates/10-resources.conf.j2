@@ -1,0 +1,34 @@
+[Unit]
+# Order after the user manager that owns the rootless podman.socket which
+# BindPaths (below) depends on.
+After=user@{{ r_uid }}.service
+Wants=user@{{ r_uid }}.service
+
+[Service]
+# The stock actions-runner unit sets NO Restart=, so if BindPaths loses the boot
+# race against the user's podman.socket the runner would stay down. Retry until
+# the socket exists.
+Restart=always
+RestartSec=5
+# --- resource bound ---
+# Caps the .NET listener/worker AND any HOST-NATIVE buildah/podman build (a job
+# with no `container:` runs buildah as a direct child of this service, so its
+# memory is bounded HERE, not in user-{{ r_uid }}.slice). Sized for a real image
+# build; swap-free so an over-cap build OOM-fails fast instead of wedging.
+Slice=runners.slice
+CPUQuota={{ agent_cpu_quota }}
+CPUWeight=100
+MemoryMax={{ agent_mem_max }}
+MemoryHigh={{ agent_mem_high }}
+MemorySwapMax={{ mem_swap_max }}
+TasksMax=12288
+IOWeight=100
+LimitNOFILE=1048576
+LimitNPROC=65536
+# --- rootless podman wiring ---
+Environment=XDG_RUNTIME_DIR={{ r_rtd }}
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+# GitHub bind-mounts /var/run/docker.sock into every container: job; podman-docker
+# symlinks that to the ROOTFUL socket (which we don't run), so it dangles. Give
+# this runner a private mount ns where the target is its own rootless socket.
+BindPaths={{ r_rtd }}/podman/podman.sock:/run/podman/podman.sock

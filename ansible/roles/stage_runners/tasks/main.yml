@@ -1,0 +1,37 @@
+---
+# Create N isolated runner users, wire rootless podman, stage the actions-runner
+# tree, and write the systemd resource drop-ins. Mirror of vps/02-stage-runners.sh.
+# Does NOT register to GitHub (needs a token — see the register_runner role).
+
+- name: Resolve latest actions/runner release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/actions/runner/releases/latest
+    return_content: true
+    # Unauthenticated API is 60 req/h per IP; pass GITHUB_TOKEN in the env to lift it.
+    headers: >-
+      {{ {'Authorization': 'Bearer ' + lookup('env', 'GITHUB_TOKEN')}
+         if lookup('env', 'GITHUB_TOKEN') else {} }}
+  register: runner_release
+  check_mode: false
+
+- name: Set runner version
+  ansible.builtin.set_fact:
+    runner_version: "{{ runner_release.json.tag_name | regex_replace('^v', '') }}"
+
+- name: Runner tarball cache dir
+  ansible.builtin.file:
+    path: "{{ runner_cache_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Download actions-runner tarball to cache
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
+    dest: "{{ runner_cache_dir }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
+    mode: "0644"
+
+- name: Stage each runner
+  ansible.builtin.include_tasks: runner.yml
+  loop: "{{ range(1, runner_count + 1) | list }}"
+  loop_control:
+    loop_var: idx

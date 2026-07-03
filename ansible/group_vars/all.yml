@@ -1,0 +1,48 @@
+---
+# ============================================================================
+# Tunables for the vymalo VPS runner host. This is the single source of truth
+# the imperative vps/*.sh scripts lacked — change a cap here, run with --check
+# --diff to see drift, then apply. Mirrors vps/02-stage-runners.sh's config
+# block and vps/01-provision-host.sh, at the POST-INCIDENT hardened values
+# (swap=0, 6G agent) — see arc-runners#8.
+# ============================================================================
+
+runner_count: 3
+runner_user_prefix: runner        # users runner-1..runner-N
+runner_name_prefix: vps-runner    # GitHub runner names vps-runner-1..N
+runner_org: vymalo
+runner_url: "https://github.com/{{ runner_org }}"
+runner_labels: "self-hosted,linux,x64,podman,vymalo-vps"
+
+# Deterministic uids (an improvement over the shell, which relied on useradd
+# allocation order). The live host already assigned 1000/1001/1002, so pinning
+# these is a no-op there; a rebuild becomes reproducible.
+runner_base_uid: 1000
+
+# Non-overlapping subuid/subgid ranges for rootless podman.
+subid_base: 100000
+subid_size: 65536
+
+# ---- cgroup resource caps -------------------------------------------------
+# Per-runner footprint spans TWO cgroups used by mutually-exclusive job types
+# (one job at a time): a `container:` build lands in user-<uid>.slice; a
+# HOST-NATIVE buildah build lands in the AGENT cgroup. So the ceiling is
+# max(agent, user) = 9G, x{{ runner_count }} = 27G <= 31G host.
+agent_cpu_quota: "100%"
+agent_mem_max: "6G"      # host-native image builds run here — sized for a real build
+agent_mem_high: "5G"
+container_cpu_quota: "400%"   # 4 vCPU ceiling for the build workload
+container_mem_max: "9G"
+container_mem_high: "8500M"
+# NO swap for job cgroups: over-cap => instant OOM-kill (fail fast), never an
+# unkillable D-state swap-thrash wedge. See arc-runners#8.
+mem_swap_max: "0"
+
+# ---- host paths -----------------------------------------------------------
+bootstrap_dir: /opt/runners-bootstrap        # helper scripts (timer ExecStarts, job hook)
+runner_cache_dir: /opt/actions-runner-cache  # cached actions-runner tarball
+host_swap_size_mb: 8192                       # 8 GiB OS buffer (cgroups can't use it, swap=0)
+
+# ---- health watchdog ------------------------------------------------------
+health_watch_interval: "2min"   # OnUnitActiveSec for runner-health-watch.timer
+health_watch_psi_warn: 20       # WARN when memory PSI "some avg60" >= this (%)

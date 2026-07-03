@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll runner cgroup health every {{ health_watch_interval }}
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ health_watch_interval }}
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

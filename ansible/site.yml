@@ -1,0 +1,21 @@
+---
+# Provision the vymalo VPS runner host(s). Idempotent; safe to re-run and to
+# dry-run with `--check --diff` for drift detection (the whole point of the
+# migration away from the imperative vps/*.sh scripts).
+#
+#   ansible-playbook site.yml --check --diff     # show drift, change nothing
+#   ansible-playbook site.yml                     # converge host + staging
+#
+# Registration is separate (needs a short-lived token) — run register-runner
+# with -e per runner, e.g.:
+#   ansible-playbook site.yml --tags register -e runner_index=1 -e "runner_token=$TOK"
+- name: Provision vymalo runner host
+  hosts: runner_hosts
+  become: true
+  roles:
+    - role: provision_host          # base host: packages, swap, sysctl, slices, timers
+      tags: [provision]
+    - role: stage_runners           # per-runner users, rootless podman, drop-ins, runner tree
+      tags: [stage]
+    - role: register_runner         # register+install+start ONE runner (needs runner_index + runner_token)
+      tags: [register, never]       # `never`: only runs when explicitly requested via --tags register
