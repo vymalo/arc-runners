@@ -1,0 +1,8 @@
+[Unit]
+Description=Prune rootless container storage on the GitHub runner host
+
+[Service]
+Type=oneshot
+ExecStart={{ bootstrap_dir }}/podman-prune.sh
+Nice=10
+IOSchedulingClass=idle

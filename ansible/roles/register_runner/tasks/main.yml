@@ -1,0 +1,83 @@
+---
+# Register + install + start ONE staged runner. Mirror of vps/register-runner.sh.
+# Requires (pass on the CLI):
+#   ansible-playbook site.yml --tags register \
+#     -e runner_index=1 -e "runner_token=$(pbpaste)"
+#
+# runner_token is a SHORT-LIVED org registration token (not a PAT), from
+# https://github.com/organizations/{{ runner_org }}/settings/actions/runners/new
+#
+# SECURITY: re-registering a runner that has already run untrusted (fork-PR) jobs
+# is unsafe — those jobs can write the tree this play then touches as root. Only
+# register fresh/trusted runners, or move to ephemeral runners for untrusted work.
+
+- name: Validate inputs
+  ansible.builtin.assert:
+    that:
+      - runner_index is defined
+      - runner_token is defined
+      - runner_token | default('') | length > 0
+    fail_msg: "Pass -e runner_index=<N> and -e runner_token=<short-lived token>"
+
+- name: Derive facts
+  ansible.builtin.set_fact:
+    r_user: "{{ runner_user_prefix }}-{{ runner_index }}"
+    r_name: "{{ runner_name_prefix }}-{{ runner_index }}"
+    r_run_dir: "/home/{{ runner_user_prefix }}-{{ runner_index }}/actions-runner"
+
+- name: Ensure the runner is staged
+  ansible.builtin.stat:
+    path: "{{ r_run_dir }}/config.sh"
+  register: r_cfg
+- name: Fail if not staged
+  ansible.builtin.fail:
+    msg: "runner {{ runner_index }} is not staged — run the stage_runners role first"
+  when: not r_cfg.stat.exists
+
+# Token goes via the ENVIRONMENT and is referenced as $RUNNER_TOKEN in the
+# command, so it never lands in argv / /proc/<pid>/cmdline (visible to the other
+# runner users' jobs). no_log keeps it out of Ansible output too.
+- name: Configure the runner
+  become: true
+  become_user: "{{ r_user }}"
+  ansible.builtin.shell:
+    chdir: "{{ r_run_dir }}"
+    cmd: >-
+      ./config.sh --url "{{ runner_url }}" --token "$RUNNER_TOKEN"
+      --name "{{ r_name }}" --labels "{{ runner_labels }}"
+      --work _work --unattended --replace
+  environment:
+    RUNNER_TOKEN: "{{ runner_token }}"
+  no_log: true
+  register: r_configure
+  changed_when: "'Settings Saved' in r_configure.stdout or 'successfully' in r_configure.stdout"
+
+# NOTE: vps/register-runner.sh additionally re-extracts svc.sh from the immutable
+# root-owned cache and root-owns the tree across the install to close a TOCTOU
+# window. Porting that hardening faithfully is a follow-up (see ansible/README.md).
+- name: Install the runner service
+  ansible.builtin.command:
+    chdir: "{{ r_run_dir }}"
+    cmd: "./svc.sh install {{ r_user }}"
+    creates: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service"
+
+- name: Reload systemd (bind the pre-staged resource drop-in)
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable + start the runner service
+  ansible.builtin.systemd:
+    name: "actions.runner.{{ runner_org }}.{{ r_name }}.service"
+    enabled: true
+    state: started
+
+- name: Show applied caps
+  ansible.builtin.command:
+    cmd: >-
+      systemctl show actions.runner.{{ runner_org }}.{{ r_name }}.service
+      -p MemoryMax -p MemorySwapMax -p Slice
+  changed_when: false
+  register: r_caps
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ r_name }} registered. {{ r_caps.stdout_lines }}"

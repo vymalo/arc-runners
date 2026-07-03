@@ -1,0 +1,9 @@
+[Unit]
+Description=Detect wedged/memory-starved GitHub runner cgroups (report-only)
+
+[Service]
+Type=oneshot
+ExecStart={{ bootstrap_dir }}/runner-health-watch.sh
+# PSI WARN threshold is parameterized from group_vars (health_watch_psi_warn).
+Environment=PSI_WARN={{ health_watch_psi_warn }}
+Nice=10

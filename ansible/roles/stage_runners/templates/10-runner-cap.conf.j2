@@ -1,0 +1,9 @@
+[Slice]
+# Bounds the runner user's rootless build CONTAINERS (container: jobs, launched by
+# the user's podman service under this slice). Host-native buildah builds are
+# bounded separately by the agent service cap. Swap-free (fail-fast OOM).
+CPUQuota={{ container_cpu_quota }}
+MemoryMax={{ container_mem_max }}
+MemoryHigh={{ container_mem_high }}
+MemorySwapMax={{ mem_swap_max }}
+TasksMax=24576
