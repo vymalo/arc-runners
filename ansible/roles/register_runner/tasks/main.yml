@@ -65,18 +65,26 @@
   when: not r_service_stat.stat.exists
 
 # Install the service with the tree ROOT-OWNED and svc.sh re-extracted pristine from
-# the immutable cache — closing the TOCTOU window where a compromised runner user
-# could swap svc.sh before this root execution (ports vps/register-runner.sh). The
-# `always` restores ownership even on failure, so the service can run as the user.
+# the immutable cache. This NARROWS (does not fully close) the TOCTOU window: svc.sh
+# is refreshed, but the bin/ helpers + unit template it reads are only re-owned to
+# root, not re-extracted — matching vps/register-runner.sh's partial coverage. At
+# first registration _work is empty (staging just ran) so the recursive chowns are
+# cheap; a rare re-register with a populated _work makes them heavier. The `always`
+# restores ownership even on failure, so the service can run as the user.
 - name: Install the runner service (hardened)
   when: not r_service_stat.stat.exists
   block:
     - name: Locate the newest cached runner tarball
       ansible.builtin.shell: "set -o pipefail; ls -1 {{ runner_cache_dir }}/actions-runner-linux-x64-*.tar.gz | sort -V | tail -1"
       args: { executable: /bin/bash }
+      # Read-only; without this, --check skips it and the next task's
+      # r_cache_tarball.stdout is undefined. Note this whole block is already
+      # gated `when: not r_service_stat.stat.exists`, so it only matters for a
+      # fresh (not-yet-installed) runner anyway.
+      check_mode: false
       register: r_cache_tarball
       changed_when: false
-    - name: Root-own the runner tree (close TOCTOU window)
+    - name: Root-own the runner tree (narrow the TOCTOU window)
       ansible.builtin.file:
         path: "{{ r_run_dir }}"
         owner: root
