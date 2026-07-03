@@ -39,6 +39,7 @@
       - ncdu
     state: present
     update_cache: true
+    cache_valid_time: 3600   # skip apt-get update if the cache is <1h old (fast --check)
     install_recommends: false
 
 # Debian ships NO unqualified-search-registries, so host-native `buildah build`
@@ -67,18 +68,26 @@
   when: not item.stat.exists
 
 # ---- swap: OS buffer (heavy CI builds); cgroups run swap=0 and can't use it --
-- name: Check for existing swapfile
+- name: Check active swap
   ansible.builtin.command: swapon --show=NAME --noheadings
   changed_when: false
   register: swap_show
+- name: Check whether /swapfile already exists on disk
+  ansible.builtin.stat:
+    path: /swapfile
+  register: swapfile_stat
 
-- name: Create /swapfile (0600 before allocation — never world-readable)
+- name: Create + enable /swapfile (0600 before allocation — never world-readable)
   when: "'/swapfile' not in swap_show.stdout"
   block:
     - ansible.builtin.command: "fallocate -l {{ host_swap_size_mb }}M /swapfile"
       args: { creates: /swapfile }
+      when: not swapfile_stat.stat.exists
     - ansible.builtin.file: { path: /swapfile, owner: root, group: root, mode: "0600" }
+    # Only format a brand-new file — never re-mkswap an existing (merely inactive)
+    # swapfile, which would reformat it and issue a fresh UUID.
     - ansible.builtin.command: mkswap /swapfile
+      when: not swapfile_stat.stat.exists
       register: mkswap_run
       changed_when: "'Setting up swapspace' in mkswap_run.stdout"
     - ansible.builtin.command: swapon /swapfile

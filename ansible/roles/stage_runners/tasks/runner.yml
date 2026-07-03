@@ -45,6 +45,7 @@
 - name: "{{ r_user }} — wait for the user runtime dir"
   ansible.builtin.wait_for:
     path: "{{ r_rtd }}"
+    state: present   # existence only — the default 'started' also gates on size>0
     timeout: 15
 
 # Initialise rootless podman + enable the docker-compat socket, as the user.
@@ -71,24 +72,51 @@
     owner: root
     group: root
     mode: "0755"
-- name: "{{ r_user }} — extract actions-runner"
+# Track the staged version in a marker file so a bumped runner_version re-extracts
+# (a static `creates: config.sh` would pin the runner at its first-installed version
+# forever). The .runner/.credentials config lives outside the tarball, so a re-extract
+# refreshes binaries without disturbing registration.
+- name: "{{ r_user }} — read staged runner version"
+  ansible.builtin.slurp:
+    src: "{{ r_run_dir }}/.staged_version"
+  register: r_staged_raw
+  failed_when: false
+  changed_when: false
+- name: "{{ r_user }} — extract actions-runner (on first install or version bump)"
   ansible.builtin.unarchive:
     src: "{{ runner_cache_dir }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
     dest: "{{ r_run_dir }}"
     remote_src: true
-    creates: "{{ r_run_dir }}/config.sh"
   register: r_extract
+  when: (r_staged_raw.content | default('') | b64decode | trim) != runner_version
 - name: "{{ r_user }} — install runner OS deps (once, while root-owned)"
   ansible.builtin.command: "{{ r_run_dir }}/bin/installdependencies.sh"
   environment:
     DEBIAN_FRONTEND: noninteractive
   when: r_extract is changed
-- name: "{{ r_user }} — hand the tree to the runner user"
+- name: "{{ r_user }} — record staged version"
+  ansible.builtin.copy:
+    dest: "{{ r_run_dir }}/.staged_version"
+    content: "{{ runner_version }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: r_extract is changed
+# Base-dir ownership every run (cheap); recursive chown ONLY on a fresh extract —
+# _work grows to thousands of files, so a recurse every converge is heavy I/O.
+- name: "{{ r_user }} — ensure runner base dir is owned by the runner user"
+  ansible.builtin.file:
+    path: "{{ r_run_dir }}"
+    state: directory
+    owner: "{{ r_user }}"
+    group: "{{ r_user }}"
+- name: "{{ r_user }} — hand the freshly-extracted tree to the runner user"
   ansible.builtin.file:
     path: "{{ r_run_dir }}"
     owner: "{{ r_user }}"
     group: "{{ r_user }}"
     recurse: true
+  when: r_extract is changed
 
 # .env: docker-compat socket + the post-job auth-cleanup hook. 0600, owner-only.
 - name: "{{ r_user }} — runner .env"
