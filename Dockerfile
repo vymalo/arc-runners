@@ -188,9 +188,28 @@ RUN set -eux; \
 # Rootless defaults so it works in a stock unprivileged pod: `vfs` storage (no
 # /dev/fuse needed) + subuid/subgid for the runner user. Override to overlay +
 # fuse-overlayfs (mount /dev/fuse) for the speed fast-path — see README.
+#
+# runroot/graphroot are PINNED explicitly (not left to podman's rootless
+# auto-detection). This image is itself run as a nested container on a rootless-
+# podman VPS host (see vymalo/arc-runners vps/), so `podman`/`buildah` invoked
+# INSIDE it are effectively podman-in-podman. c/storage's rootless default-path
+# computation needs XDG_RUNTIME_DIR (or a real /run/user/<uid>) to derive a
+# runroot — but a `container:` job's env has neither (GitHub Actions only injects
+# HOME/GITHUB_ACTIONS/CI, and a job that overrides `--user root` still runs
+# inside the OUTER rootless user namespace, so podman's userns detection still
+# takes the rootless code path regardless of the apparent in-container uid).
+# With no usable default, c/storage fails immediately with "runroot must be set"
+# — e.g. vymalo-shop's `backend integration tests` job, which does
+# `podman run -d ... postgres:17-alpine` as its first step (see vymalo/arc-runners
+# root-cause writeup: the fix belongs here so every consuming job gets it, not in
+# each workflow). Fixed dirs sidestep that detection entirely: a config-supplied
+# runroot/graphroot is used verbatim, never recomputed. World-writable (1777)
+# since a job can run as root, the baked `runner` uid, or (rarely) another uid.
 RUN set -eux; \
     mkdir -p /etc/containers; \
-    printf '[storage]\ndriver = "vfs"\n' > /etc/containers/storage.conf; \
+    mkdir -p /var/lib/nested-podman/storage /var/lib/nested-podman/run; \
+    chmod 1777 /var/lib/nested-podman/storage /var/lib/nested-podman/run; \
+    printf '[storage]\ndriver = "vfs"\nrunroot = "/var/lib/nested-podman/run"\ngraphroot = "/var/lib/nested-podman/storage"\n' > /etc/containers/storage.conf; \
     # Force the netavark backend (+ aardvark-dns) so `podman compose` containers
     # resolve each other by service name. The default CNI backend ships no DNS
     # plugin, so compose stacks fail with "lookup <svc>: no such host".
