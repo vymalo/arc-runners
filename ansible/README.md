@@ -62,8 +62,8 @@ improvement over the shell's reliance on `useradd` allocation order.
 2. `ansible-playbook site.yml --check --diff` against the host — **expect near-zero
    changes** (the host is already in the target state). Any diff is real drift to
    read carefully.
-3. Converge on the host; confirm all three runners stay `active` and the caps
-   match (`systemctl show … -p MemoryMax -p MemorySwapMax`).
+3. Converge on the host; confirm all `runner_count` runners stay `active` and the
+   caps match (`systemctl show … -p MemoryMax -p MemorySwapMax`).
 4. Only then retire `vps/*.sh` (and move the helper scripts into the roles' `files/`
    for self-containment).
 
