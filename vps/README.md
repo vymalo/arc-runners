@@ -1,6 +1,13 @@
 # vymalo self-hosted runners — VPS bootstrap
 
-Three isolated GitHub Actions runners on a standalone VPS, registered to the
+> **⚠️ Legacy — `../ansible/` is now the source of truth.** These shell scripts
+> provisioned the box originally, but the host is now managed declaratively by the
+> Ansible roles in `../ansible/` (validated + converged, drift-detectable via
+> `--check`). The counts/caps below are the ORIGINAL 3-runner layout and are no
+> longer current (as of 2026-07-05 the box runs **2** runners with reshared caps —
+> see `ansible/group_vars/all.yml`). Retiring this directory is a tracked follow-up.
+
+Isolated GitHub Actions runners on a standalone VPS, registered to the
 **vymalo org** so any repo's workflows can target them. Rootless Podman +
 Buildah provide the container runtime (no Docker daemon). Each runner is
 hard-capped by systemd to its own slice of the machine.
