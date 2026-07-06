@@ -34,13 +34,25 @@
     msg: "runner {{ runner_index }} is not staged — run the stage_runners role first"
   when: not r_cfg.stat.exists
 
-# Idempotency + re-register safety: skip (re)configuration once the service unit
-# exists. Re-running config.sh on an already-registered runner with an
-# expired/absent token would fail; force a re-register by removing the service first.
+# Re-register safety: skip (re)configuration once the service unit exists.
 - name: Check whether the runner service is already installed
   ansible.builtin.stat:
     path: "/etc/systemd/system/actions.runner.{{ runner_org }}.{{ r_name }}.service"
   register: r_service_stat
+
+# Idempotency + partial-failure RECOVERY: gate config on config.sh's OWN
+# precondition — the presence of the `.runner` marker it writes. config.sh refuses
+# ("already configured, run './config.sh remove' first") if `.runner` exists, so
+# re-running it always fails once the runner is configured — even with --replace,
+# which only resolves a server-side NAME collision, not a local reconfigure. Gating
+# on `.runner` (not the service) means a run that configured the runner but then
+# died before installing the service RECOVERS on re-run: config is skipped and the
+# install block below (gated on service absence) finishes the job. To force a full
+# re-register, run `./config.sh remove` (clears `.runner`) AND remove the service.
+- name: Check whether the runner is already configured
+  ansible.builtin.stat:
+    path: "{{ r_run_dir }}/.runner"
+  register: r_runner_cfg
 
 # Token goes via the ENVIRONMENT and is referenced as $RUNNER_TOKEN in the command,
 # so it never lands in argv / /proc/<pid>/cmdline (visible to the other runner
@@ -62,51 +74,75 @@
   no_log: true
   register: r_configure
   changed_when: "'Settings Saved' in r_configure.stdout or 'successfully' in r_configure.stdout"
-  when: not r_service_stat.stat.exists
+  when: not r_runner_cfg.stat.exists
 
-# Install the service with the tree ROOT-OWNED and svc.sh re-extracted pristine from
-# the immutable cache. This NARROWS (does not fully close) the TOCTOU window: svc.sh
-# is refreshed, but the bin/ helpers + unit template it reads are only re-owned to
-# root, not re-extracted — matching vps/register-runner.sh's partial coverage. At
-# first registration _work is empty (staging just ran) so the recursive chowns are
-# cheap; a rare re-register with a populated _work makes them heavier. The `always`
-# restores ownership even on failure, so the service can run as the user.
+# Install the service with the runner tree ROOT-OWNED, to NARROW (not fully close)
+# the TOCTOU window before `svc.sh install` runs it as root: once the tree is
+# root:root, a concurrent job running as {{ r_user }} can no longer swap svc.sh or
+# the bin/ helpers out from under the install. The residual window (config.sh
+# writing svc.sh as the user -> this chown) matches vps/register-runner.sh's
+# partial coverage.
+#
+# NOTE: svc.sh is NOT a tarball member — config.sh GENERATES it from the immutable
+# ./bin/systemd.svc.sh.template with the service name substituted in, so there is
+# nothing to "re-extract pristine" (an earlier version tried and always failed:
+# `include: ./svc.sh` matches no member). Root-owning the tree is the mitigation.
+#
+# Both chowns EXCLUDE _work. svc.sh install only reads the runner scripts/binaries
+# (svc.sh, bin/, templates) — never _work — so root-owning _work is pure downside:
+# it would be slow on a re-register with a populated _work, and it would flatten the
+# subuid/subgid ownership of files that rootless-podman container jobs wrote there
+# (100000+), breaking later jobs. At first registration _work doesn't exist yet
+# anyway. The `always` restore runs even on failure so the service can run as the
+# user. (find -maxdepth 1 -exec chown -R excludes just the top-level _work dir.)
 - name: Install the runner service (hardened)
   when: not r_service_stat.stat.exists
   block:
-    - name: Locate the newest cached runner tarball
-      ansible.builtin.shell: "set -o pipefail; ls -1 {{ runner_cache_dir }}/actions-runner-linux-x64-*.tar.gz | sort -V | tail -1"
-      args: { executable: /bin/bash }
-      # Read-only; without this, --check skips it and the next task's
-      # r_cache_tarball.stdout is undefined. Note this whole block is already
-      # gated `when: not r_service_stat.stat.exists`, so it only matters for a
-      # fresh (not-yet-installed) runner anyway.
-      check_mode: false
-      register: r_cache_tarball
-      changed_when: false
-    - name: Root-own the runner tree (narrow the TOCTOU window)
-      ansible.builtin.file:
-        path: "{{ r_run_dir }}"
-        owner: root
-        group: root
-        recurse: true
-    - name: Re-extract a pristine svc.sh from the cache
-      ansible.builtin.unarchive:
-        src: "{{ r_cache_tarball.stdout }}"
-        dest: "{{ r_run_dir }}"
-        remote_src: true
-        include: ["./svc.sh"]
-    - name: Install the service (root, pristine svc.sh)
+    - name: Root-own the runner tree except _work (narrow the TOCTOU window)
+      ansible.builtin.command:
+        chdir: "{{ r_run_dir }}"
+        argv:
+          - find
+          - .
+          - -mindepth
+          - "1"
+          - -maxdepth
+          - "1"
+          - "!"
+          - -name
+          - _work
+          - -exec
+          - chown
+          - -R
+          - "root:root"
+          - "{}"
+          - +
+      changed_when: true
+    - name: Install the service (root-owned tree)
       ansible.builtin.command:
         chdir: "{{ r_run_dir }}"
         cmd: "./svc.sh install {{ r_user }}"
   always:
-    - name: Restore runner-tree ownership to the runner user
-      ansible.builtin.file:
-        path: "{{ r_run_dir }}"
-        owner: "{{ r_user }}"
-        group: "{{ r_user }}"
-        recurse: true
+    - name: Restore runner-tree ownership to the runner user except _work
+      ansible.builtin.command:
+        chdir: "{{ r_run_dir }}"
+        argv:
+          - find
+          - .
+          - -mindepth
+          - "1"
+          - -maxdepth
+          - "1"
+          - "!"
+          - -name
+          - _work
+          - -exec
+          - chown
+          - -R
+          - "{{ r_user }}:{{ r_user }}"
+          - "{}"
+          - +
+      changed_when: true
 
 - name: Reload systemd (bind the pre-staged resource drop-in)
   ansible.builtin.systemd:

@@ -1,0 +1,6 @@
+---
+# Galaxy collections this playbook needs beyond ansible.builtin. Install with:
+#   ansible-galaxy collection install -r requirements.yml
+# (or run the playbook via the full `ansible` package, which bundles these).
+collections:
+  - name: ansible.posix   # provides ansible.posix.mount (fstab swap persistence)
