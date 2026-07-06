@@ -1,0 +1,35 @@
+---
+# ============================================================================
+# Overrides for the SECOND VPS runner host (inventory name vps-runners-2).
+# A SMALLER box than the primary: 8 vCPU / 15 GiB vs 12 vCPU / 31 GiB.
+#
+# group_vars/all.yml is hand-tuned for the 31 GiB primary (2 runners, per-runner
+# ceiling max(9G, 13.5G) = 13.5G, x2 = 27G <= 31G). Dropping those same caps here
+# would over-commit badly: two concurrent `container:` jobs could each claim 13.5G
+# => 27G on a 15 GiB box, and with swap=0 the loser is INSTANTLY OOM-killed. So
+# this host runs ONE larger runner sized to its RAM instead.
+# ============================================================================
+
+runner_count: 1
+
+# GitHub runner names are ORG-GLOBAL and must not collide with the primary's
+# vps-runner-1. Distinct prefix => this host registers `vps2-runner-1`. Labels
+# stay identical (see runner_labels in all.yml) so jobs targeting `vymalo-vps`
+# transparently load-balance across both boxes.
+runner_name_prefix: vps2-runner
+
+# ---- cgroup resource caps (sized for 15 GiB / 8 vCPU, one runner) ----------
+# One runner runs one job at a time, and a `container:` build (user-<uid>.slice)
+# and a host-native buildah build (agent cgroup) are mutually exclusive, so the
+# peak footprint is max(agent, container) = 12G <= 15G (leaves ~3G for the OS).
+# CPU 700% = 7 vCPU, reserving 1 core for the OS/podman. swap stays 0 (inherited
+# from all.yml): over-cap => fail-fast OOM, never an unkillable D-state wedge.
+agent_cpu_quota: "700%"
+agent_mem_max: "12G"          # host-native image builds run here
+agent_mem_high: "10240M"      # 10G (~85% of max — throttle before the hard cap)
+container_cpu_quota: "700%"
+container_mem_max: "12288M"   # 12G
+container_mem_high: "10240M"  # 10G (~85%)
+
+# Everything else (subid ranges, host swapfile, prune/health timers, base uid)
+# is inherited from group_vars/all.yml and is correct for this box as-is.
