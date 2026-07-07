@@ -214,6 +214,19 @@ RUN set -eux; \
     # resolve each other by service name. The default CNI backend ships no DNS
     # plugin, so compose stacks fail with "lookup <svc>: no such host".
     printf '[network]\nnetwork_backend = "netavark"\n' > /etc/containers/containers.conf; \
+    # subuid/subgid for the baked `runner` user only — deliberately NO `root` entry.
+    # Consequence for nested podman: a `container:` job that does `podman run` AS
+    # ROOT (`--user root`) must also be `--privileged`. With `--privileged`, podman
+    # runs the inner container without id-shifting, so no root subuid range is
+    # needed (verified: nested `podman run postgres:17-alpine --network host` works).
+    # WITHOUT `--privileged`, nested-podman-as-root falls back to a single-id
+    # mapping and cannot extract any image with non-zero-gid files — e.g. alpine's
+    # /etc/shadow (gid 42) fails with "potentially insufficient UIDs or GIDs ...
+    # lchown /etc/shadow: invalid argument", exit 125. vymalo-shop's `backend
+    # integration tests` job uses `--privileged --user root` for exactly this. No
+    # root entry is added because no job needs non-privileged nested-podman-as-root
+    # (and --privileged is the established pattern); if you ever do, run the nested
+    # podman as the `runner` user — which HAS the range above — instead.
     printf 'runner:100000:65536\n' > /etc/subuid; \
     printf 'runner:100000:65536\n' > /etc/subgid
 
