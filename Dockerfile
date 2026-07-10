@@ -35,6 +35,9 @@
 #                gum (pretty output, optional); pre-commit (pipx); zsh
 #                (hooks that run under `zsh -i -c`); jq + yq (YAML; the latter
 #                required by subosito/flutter-action's flutter-version-file).
+#   CI baseline — git-lfs, zstd, wget, rsync: bundled by GitHub-hosted ubuntu
+#                runners but missing from the actions-runner base; baked so
+#                workflows assuming a hosted environment work here too.
 #
 # Bump any tool by editing its ARG below; the image rebuilds on the next
 # push touching `Dockerfile` (or via workflow_dispatch).
@@ -128,6 +131,18 @@ ARG FASTLANE_CONSTRAINT="~> 2.236"
 # doesn't silently depend on it). pipx + python3-venv to install pre-commit. Java
 # (OpenJDK, JAVA_VERSION matrix axis — 21 is the AGP-supported LTS, 25 the
 # newer LTS) + Ruby for the Android / fastlane lanes.
+#
+# CI-baseline tools that GitHub-hosted `ubuntu` runners bundle but the
+# actions-runner base does NOT (verified against the base image) — baked so
+# workflows that assume a GitHub-hosted environment don't break on these runners:
+#   git-lfs — `actions/checkout` with `lfs: true`; LFS-backed asset repos.
+#   zstd    — `actions/cache` + `actions/upload-artifact` compress with zstd;
+#             without it they fall back to gzip (slower + version-mismatch noise).
+#   wget    — this image otherwise ships only curl; many third-party action
+#             install scripts and shell steps assume wget.
+#   rsync   — deploy/sync steps and actions that shell out to it.
+# (openssh-client is already in the base, so it is intentionally NOT listed.)
+# These track Ubuntu's repo — unpinned, like buildah/podman below.
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
        build-essential \
@@ -140,6 +155,10 @@ RUN apt-get update -y \
        curl \
        gnupg \
        git \
+       git-lfs \
+       zstd \
+       wget \
+       rsync \
        unzip \
        xz-utils \
        zip \
@@ -150,7 +169,12 @@ RUN apt-get update -y \
        python3-venv \
        "openjdk-${JAVA_VERSION}-jdk-headless" \
        ruby-full \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Register the LFS smudge/clean filters system-wide (/etc/gitconfig) so
+    # every user (root + the baked `runner`) gets LFS-aware git. --skip-repo:
+    # there is no repo at build time. Mirrors GitHub-hosted runner setup.
+    && git lfs install --system --skip-repo \
+    && git-lfs --version
 
 ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_VERSION}-openjdk-amd64
 
