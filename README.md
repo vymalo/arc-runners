@@ -42,7 +42,7 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 
 | Ecosystem | Tools |
 | --------- | ----- |
-| **System** | build-essential, pkg-config, libssl-dev, cmake, clang, libclang-dev, curl, git, unzip, xz-utils, zip, **zsh**, **moreutils** (`chronic`), **jq** |
+| **System** | build-essential, pkg-config, libssl-dev, cmake, clang, libclang-dev, curl, **wget**, git, **git-lfs**, **zstd**, **rsync**, unzip, xz-utils, zip, **zsh**, **moreutils** (`chronic`), **jq** |
 | **Rust** | stable toolchain (rustup) + `rustfmt`/`clippy`/`rust-src`/`llvm-tools-preview` + `wasm32-unknown-unknown` target; cargo tools `cargo-llvm-cov`, `just`, `cargo-nextest`, `cargo-deny`, `sccache` |
 | **Codegen** | `flutter_rust_bridge_codegen`, `cratestack-cli` |
 | **Node / JS** | Node (**22** or **24**, matrix axis) + `pnpm` (via corepack) |
