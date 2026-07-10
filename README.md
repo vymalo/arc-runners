@@ -50,7 +50,7 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 | **Flutter** | Flutter SDK (bundles Dart) + precached engine/Android artifacts |
 | **Android** | cmdline-tools + platform-tools + build-tools + platform, on OpenJDK **21** |
 | **Mobile release** | Ruby + bundler + fastlane |
-| **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client) |
+| **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client), `gh` (GitHub CLI) |
 | **Pre-commit** | `pre-commit` (via pipx) |
 
 ### Pinned versions
