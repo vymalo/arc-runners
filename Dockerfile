@@ -26,7 +26,7 @@
 #                later, but only 21 is built today (newer JDKs need validation
 #                against the consuming repo's Gradle/AGP pins first).
 #   Mobile rel — Ruby + bundler + fastlane (Android build/release lane).
-#   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client).
+#   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client), gh (GitHub CLI).
 #   Containers — rootless Buildah (image build) + Podman (run/compose) +
 #                docker-compose provider, for daemonless builds and compose
 #                smoke tests WITHOUT a privileged dind sidecar (vfs+chroot
@@ -109,6 +109,13 @@ ARG KUBECTL_VERSION=1.36.2
 # compatibility (https://helm.sh/docs/overview/), so existing charts work.
 ARG HELM_VERSION=4.2.2
 ARG ARGOCD_VERSION=3.4.4
+# GitHub CLI (cli/cli). Used by workflows for `gh` API calls / releases / PR ops;
+# NOT in the actions-runner base (GitHub-hosted ubuntu bundles it, this image must
+# bake it). gh ships no per-asset .sha256 — the release publishes a combined
+# `gh_<ver>_checksums.txt`; the amd64-tarball digest is pinned here (cross-checked
+# against that file) and verified at build.
+ARG GH_VERSION=2.96.0
+ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 ARG FASTLANE_CONSTRAINT="~> 2.236"
 
 # ---- System packages --------------------------------------------------
@@ -353,6 +360,18 @@ RUN set -eux; \
       -o /usr/local/bin/mc; \
     chmod 0755 /usr/local/bin/mc; \
     kubectl version --client; helm version; argocd version --client; mc --version
+
+# ---- GitHub CLI (gh) — digest-verified tarball ------------------------
+# Extracts to gh_<ver>_linux_amd64/bin/gh; installed to /usr/local/bin (on PATH).
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/gh.tar.gz; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64"; \
+    gh --version
 
 # ---- Everything below runs AS the runner user -------------------------
 # rustup/cargo metadata lands in /home/runner/{.cargo,.rustup} (the
