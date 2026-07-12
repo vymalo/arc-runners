@@ -201,22 +201,33 @@ service: a job starts the user-space daemon itself and points `buildctl` at it,
 so there is still no privileged `dind` sidecar. A minimal build-and-push step:
 
 ```bash
-# 1. start the rootless daemon (native snapshotter — no /dev/fuse needed)
-rootlesskit buildkitd &
-# 2. build straight from a Dockerfile and push (registry auth from docker login-action)
+# 1. start the rootless daemon. Inside a pod/container add
+#    --oci-worker-no-process-sandbox: k8s has no `systempaths=unconfined`, so
+#    buildkitd can't unmask /proc for a per-step sandbox (caveat: build steps
+#    can then signal/ptrace the daemon). Default `native` snapshotter → no /dev/fuse.
+rootlesskit buildkitd --oci-worker-no-process-sandbox &
+# 2. build straight from a Dockerfile and push (registry auth from docker/login-action)
 buildctl build \
   --frontend dockerfile.v0 \
   --local context=. --local dockerfile=. \
   --output type=image,name=ghcr.io/you/app:tag,push=true
 ```
 
+**Privilege — not lighter than buildah.** Rootless BuildKit sets up an
+unprivileged user namespace the same way buildah does, so it is **not** a way to
+drop buildah's pod-security requirements. BuildKit's [upstream Kubernetes
+example](https://github.com/moby/buildkit/tree/master/examples/kubernetes) runs
+with `seccompProfile: Unconfined` + `appArmorProfile: Unconfined` (plus the
+`--oci-worker-no-process-sandbox` above) — a **`baseline`-or-looser** pod, not a
+tighter one — and it is blocked by the *same* Ubuntu-24.04
+`kernel.apparmor_restrict_unprivileged_userns=1` node sysctl that blocks buildah
+(see the buildah notes above). Validate the exact flags/`securityContext` with a
+smoke test in your runner pod before switching a workflow over.
+
 Storage mirrors the buildah story: the default **`native`** snapshotter needs no
 `/dev/fuse` (like Podman's `vfs`); for the faster **`fuse-overlayfs`**
-snapshotter, mount `/dev/fuse` and start the daemon with
-`--oci-worker-snapshotter=fuse-overlayfs`. The same
-`allowPrivilegeEscalation: true` requirement as buildah applies — buildkitd sets
-up its rootless user namespace via the setuid `newuidmap`/`newgidmap`. Only the
-amd64 `buildkitd`/`buildctl`/`buildkit-runc` binaries are installed; the
+snapshotter, mount `/dev/fuse` and add `--oci-worker-snapshotter=fuse-overlayfs`.
+Only the amd64 `buildkitd`/`buildctl`/`buildkit-runc` binaries are installed; the
 tarball's bundled CNI plugins (rootless uses host networking via
 `rootlesskit`/`slirp4netns`) and cross-arch QEMU binaries (this image is
 amd64-only) are dropped.

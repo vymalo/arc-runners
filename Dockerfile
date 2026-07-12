@@ -286,10 +286,13 @@ RUN set -eux; \
 #       --output type=image,name=<ref>,push=true
 # Storage mirrors the podman story: buildkitd's default `native` snapshotter
 # needs no /dev/fuse (like podman's vfs); mount /dev/fuse and pass
-# --oci-worker-snapshotter=fuse-overlayfs for the fast-path. The same
-# allowPrivilegeEscalation:true requirement as buildah applies (buildkitd's
-# rootless userns uses the setuid newuidmap/newgidmap). Only the amd64
-# buildkitd/buildctl/buildkit-runc binaries are installed — the tarball's
+# --oci-worker-snapshotter=fuse-overlayfs for the fast-path. NOTE: rootless
+# BuildKit is NOT a lighter-privilege path than buildah — it sets up an
+# unprivileged userns the same way, so it needs a baseline-or-looser pod
+# (upstream's k8s example runs seccomp+apparmor Unconfined +
+# --oci-worker-no-process-sandbox) and is blocked by the same Ubuntu-24.04
+# apparmor_restrict_unprivileged_userns=1 node sysctl as buildah (see README).
+# Only the amd64 buildkitd/buildctl/buildkit-runc binaries are installed — the tarball's
 # bundled CNI plugins (rootless uses host networking via rootlesskit/
 # slirp4netns) and cross-arch qemu binaries (amd64-only image) are dropped.
 RUN set -eux; \
