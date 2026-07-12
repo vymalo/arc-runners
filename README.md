@@ -191,6 +191,36 @@ lookups fall through to the host/cluster resolver and fail with
 `aardvark-dns`** and pins `network_backend = "netavark"` in
 `/etc/containers/containers.conf`, so compose service discovery works out of the box.
 
+### Rootless image builds with BuildKit (`buildctl`)
+
+Alongside buildah, the image bakes **rootless BuildKit** — `buildkitd` +
+`buildctl` plus **`rootlesskit`** — for jobs that want BuildKit's own frontend
+and cache features (registry cache exporters, `--mount=type=cache`,
+reproducible-build options) rather than buildah's CLI. It is **not** a baked
+service: a job starts the user-space daemon itself and points `buildctl` at it,
+so there is still no privileged `dind` sidecar. A minimal build-and-push step:
+
+```bash
+# 1. start the rootless daemon (native snapshotter — no /dev/fuse needed)
+rootlesskit buildkitd &
+# 2. build straight from a Dockerfile and push (registry auth from docker login-action)
+buildctl build \
+  --frontend dockerfile.v0 \
+  --local context=. --local dockerfile=. \
+  --output type=image,name=ghcr.io/you/app:tag,push=true
+```
+
+Storage mirrors the buildah story: the default **`native`** snapshotter needs no
+`/dev/fuse` (like Podman's `vfs`); for the faster **`fuse-overlayfs`**
+snapshotter, mount `/dev/fuse` and start the daemon with
+`--oci-worker-snapshotter=fuse-overlayfs`. The same
+`allowPrivilegeEscalation: true` requirement as buildah applies — buildkitd sets
+up its rootless user namespace via the setuid `newuidmap`/`newgidmap`. Only the
+amd64 `buildkitd`/`buildctl`/`buildkit-runc` binaries are installed; the
+tarball's bundled CNI plugins (rootless uses host networking via
+`rootlesskit`/`slirp4netns`) and cross-arch QEMU binaries (this image is
+amd64-only) are dropped.
+
 ## Optional shared caches
 
 The image bakes `sccache` and `mc`, but **no cache endpoints or credentials are

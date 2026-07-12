@@ -28,7 +28,8 @@
 #   Mobile rel — Ruby + bundler + fastlane (Android build/release lane).
 #   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client), gh (GitHub CLI).
 #   Containers — rootless Buildah (image build) + Podman (run/compose) +
-#                docker-compose provider, for daemonless builds and compose
+#                docker-compose provider + rootless BuildKit (buildkitd/buildctl
+#                launched via rootlesskit), for daemonless builds and compose
 #                smoke tests WITHOUT a privileged dind sidecar (vfs+chroot
 #                defaults; see README for the fuse-overlayfs fast-path).
 #   just deps  — chronic (moreutils, used by `just` recipe wrappers) +
@@ -90,6 +91,20 @@ ARG YQ_SHA256=fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4
 # runs the dev-stack smoke test; no Docker daemon involved). Verified at build
 # via the release's published .sha256 asset.
 ARG COMPOSE_VERSION=5.2.0
+# BuildKit (moby/buildkit) — daemonless, rootless image builder baked alongside
+# buildah for jobs that want BuildKit's own frontend/cache features (registry
+# cache exporters, `--mount=type=cache`, reproducible builds) instead of
+# buildah's CLI. Launched per-job as a user-space daemon (`rootlesskit
+# buildkitd`), so it introduces NO privileged dind — same stance as buildah/
+# podman below. BuildKit ships no per-asset .sha256; the amd64 tarball digest is
+# pinned here (the release asset's GitHub-computed digest) and verified at build.
+ARG BUILDKIT_VERSION=0.31.1
+ARG BUILDKIT_SHA256=1fc78750d0c96bdc18799a3c0b551d6807bd4939e8cd79e357823e467451e16e
+# rootlesskit — user-namespace + network launcher required to run buildkitd
+# rootless (`rootlesskit buildkitd`); reuses the baked slirp4netns for
+# networking. Digest pinned from the release asset (verified at build).
+ARG ROOTLESSKIT_VERSION=3.0.2
+ARG ROOTLESSKIT_SHA256=f4f2764cdd99db4f3fa715acac9d760c49a5e7c2838f180bdbe3188cec248dfb
 # FRB CLI MUST match the plugins' `flutter_rust_bridge = "=2.12.0"`; this is
 # repo-pinned, not a latest-tracking value.
 ARG FRB_VERSION=2.12.0
@@ -260,6 +275,39 @@ RUN set -eux; \
     # podman as the `runner` user — which HAS the range above — instead.
     printf 'runner:100000:65536\n' > /etc/subuid; \
     printf 'runner:100000:65536\n' > /etc/subgid
+
+# ---- BuildKit (rootless) — buildkitd + buildctl + rootlesskit ---------------
+# A daemonless, rootless complement to buildah for jobs that want BuildKit's
+# frontend + cache features. NOT baked as a service: a job starts the user-space
+# daemon itself and points buildctl at it, e.g.
+#     rootlesskit buildkitd &                      # native snapshotter, no /dev/fuse
+#     buildctl build --frontend dockerfile.v0 \
+#       --local context=. --local dockerfile=. \
+#       --output type=image,name=<ref>,push=true
+# Storage mirrors the podman story: buildkitd's default `native` snapshotter
+# needs no /dev/fuse (like podman's vfs); mount /dev/fuse and pass
+# --oci-worker-snapshotter=fuse-overlayfs for the fast-path. The same
+# allowPrivilegeEscalation:true requirement as buildah applies (buildkitd's
+# rootless userns uses the setuid newuidmap/newgidmap). Only the amd64
+# buildkitd/buildctl/buildkit-runc binaries are installed — the tarball's
+# bundled CNI plugins (rootless uses host networking via rootlesskit/
+# slirp4netns) and cross-arch qemu binaries (amd64-only image) are dropped.
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz" \
+      -o /tmp/buildkit.tar.gz; \
+    echo "${BUILDKIT_SHA256}  /tmp/buildkit.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/buildkit.tar.gz -C /tmp bin/buildkitd bin/buildctl bin/buildkit-runc; \
+    install -m 0755 /tmp/bin/buildkitd /tmp/bin/buildctl /tmp/bin/buildkit-runc /usr/local/bin/; \
+    rm -rf /tmp/buildkit.tar.gz /tmp/bin; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/rootless-containers/rootlesskit/releases/download/v${ROOTLESSKIT_VERSION}/rootlesskit-x86_64.tar.gz" \
+      -o /tmp/rootlesskit.tar.gz; \
+    echo "${ROOTLESSKIT_SHA256}  /tmp/rootlesskit.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/rootlesskit.tar.gz -C /tmp rootlesskit; \
+    install -m 0755 /tmp/rootlesskit /usr/local/bin/; \
+    rm -f /tmp/rootlesskit.tar.gz /tmp/rootlesskit; \
+    buildkitd --version; buildctl --version; rootlesskit --version
 
 # ---- yq (mikefarah) — required by subosito/flutter-action; digest-verified ----
 RUN set -eux; \
