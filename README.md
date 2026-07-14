@@ -180,17 +180,34 @@ template:
 > re-grant it. Tell it apart from a pod-security problem by reading
 > `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` on the runner.
 >
-> **The rootless fix is to flip the node sysctl, not to go privileged.** Set
-> `kernel.apparmor_restrict_unprivileged_userns=0` on each runner node (a
-> `sysctl.d` drop-in, kernel cmdline, or — the GitOps-native way — a small
-> privileged node-tuning DaemonSet that `sysctl -w`s it on every node). The runner
-> pod then stays **non-privileged**: `runAsUser: 1001`,
-> `allowPrivilegeEscalation: true`, `capabilities.add: [SETUID, SETGID]`, AppArmor
-> + seccomp `Unconfined` — a `baseline`-PSS pod, not a privileged one. Running the
-> runner `privileged: true` also works (CAP_SYS_ADMIN bypasses the restriction) but
-> it is a *strictly larger* privilege grant than fixing the one node sysctl, so
-> prefer the sysctl. Whichever you pick, apply it to **every** node a runner can
-> schedule onto.
+> Flipping `kernel.apparmor_restrict_unprivileged_userns=0` on the node removes
+> **this** blocker — a bare `unshare -U -r` then succeeds in-pod. But on
+> Kubernetes that is **necessary, not sufficient**, and which workloads it unlocks
+> differs sharply (verified end-to-end on Ubuntu-24.04 k3s):
+>
+> - **`buildah build` — works non-privileged.** With the node sysctl flipped and
+>   `STORAGE_DRIVER=vfs` + `BUILDAH_ISOLATION=chroot`, buildah builds fine in a
+>   `baseline`-PSS pod (`allowPrivilegeEscalation: true`, `capabilities.add:
+>   [SETUID, SETGID]`, AppArmor + seccomp `Unconfined`). chroot isolation means the
+>   build needs no nested user namespace.
+> - **`podman run` / `podman compose` / service containers — need
+>   `privileged: true`.** These *run* a container, which extracts images whose
+>   files carry non-zero gids (e.g. alpine/postgres `/etc/shadow`, gid 42). That
+>   requires mapping a real **subuid range**, and a non-privileged pod can't:
+>   sharing the host user namespace, `newuidmap` can't write the multi-range
+>   `uid_map` (no `CAP_SETUID` over the host userns → `write to uid_map failed:
+>   Operation not permitted`); and `hostUsers: false` only grants a fixed
+>   65536-uid namespace with no room for a subuid range → podman falls back to a
+>   single mapping and image extraction dies with `lchown /etc/shadow: invalid
+>   argument`. Only `privileged: true` sidesteps id-shifting entirely (the inner
+>   container runs without a subuid map). Apply it to the runner container (still
+>   `runAsUser: 1001`, non-root) — see the `/etc/subuid` discussion in the
+>   Dockerfile for the same mechanism under nested podman.
+>
+> So: a runner group that only does image *builds* can stay non-privileged with the
+> node sysctl; a group that runs `podman run`/compose (most CI with service
+> containers) still needs `privileged: true`. Whichever you choose, apply the node
+> setting to **every** node a runner can schedule onto.
 
 ### `podman compose` needs container DNS (netavark)
 
