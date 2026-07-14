@@ -118,8 +118,17 @@
       vm.max_map_count = 262144
       # Connection backlog for compose smoke tests / local servers.
       net.core.somaxconn = 4096
-      # Plenty of user namespaces for rootless podman across runners.
+      # Plenty of user namespaces for rootless podman/buildkit across runners.
       user.max_user_namespaces = 280000
+      # Allow UNPRIVILEGED user-namespace creation. Rootless podman/buildah and
+      # rootless BuildKit (rootlesskit buildkitd) all need to write a multi-entry
+      # uid_map; Ubuntu 24.04 / Debian trixie kernels default this restriction to
+      # 1, which EPERMs the uid_map write even for a capability-free
+      # `unshare -U -r` (no securityContext or pod cap can re-grant it — it's an
+      # unnamespaced node sysctl). Debian 12 (bookworm, kernel 6.1) doesn't set the
+      # restriction, so this is a NO-OP there; it's set defensively so a trixie/
+      # Ubuntu rebuild of a runner host stays purely rootless without surprise.
+      kernel.apparmor_restrict_unprivileged_userns = 0
   notify: Reload sysctl
 
 # ---- runners group + pam ulimits (keyed on the group, not usernames) ---------
