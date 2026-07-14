@@ -24,6 +24,7 @@ set -uo pipefail
 
 # ---- tunables (override via /etc/runner-health-watch.env) ----------------
 PSI_WARN="${PSI_WARN:-20}"          # WARN when memory PSI "some avg60" >= this (%)
+DISK_WARN="${DISK_WARN:-80}"        # WARN when the storage FS is >= this (% used)
 STATE_DIR="${STATE_DIR:-/run/runner-health-watch}"   # tmpfs: oom_kill baselines
 WEBHOOK_URL="${WEBHOOK_URL:-}"      # optional: POST a JSON alert on WARN
 CG_ROOT=/sys/fs/cgroup
@@ -123,6 +124,19 @@ for svc_cg in "$CG_ROOT"/runners.slice/actions.runner.*.service; do
     [[ -n "$uid" ]] && check_cgroup "user:${user}" "$CG_ROOT/user.slice/user-${uid}.slice"
   fi
 done
+
+# ---- disk pressure on the storage FS (rootless stores live under /home) ---
+# A full disk is what makes container: builds die with "No space left on device"
+# yet leaves the cgroups healthy — so it is invisible to the checks above. This
+# is the early signal that was missing before the disk-full incident; the daily
+# prune + per-job cleanup do the reclaiming, this only reports.
+disk_usage=$(df --output=pcent /home 2>/dev/null | tail -1 | tr -dc '0-9')
+[[ -n "$disk_usage" ]] || disk_usage=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')
+if [[ -n "$disk_usage" ]] && (( disk_usage >= DISK_WARN )); then
+  msg="UNHEALTHY disk: storage FS at ${disk_usage}% used (>=${DISK_WARN}%)"
+  log warning "$msg"
+  warnings+=("$msg")
+fi
 
 # ---- optional webhook on any WARN ----------------------------------------
 if (( ${#warnings[@]} > 0 )) && [[ -n "$WEBHOOK_URL" ]]; then

@@ -223,8 +223,12 @@ token and gets **`403 Forbidden`** from ghcr instead of pulling a public image
 anonymously.
 
 `job-completed-cleanup.sh` (wired via `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in each
-runner's `.env`) wipes `~/.docker/config.json` + `containers/auth.json` after
-every job, so each job starts clean. Symptom if this ever regresses:
+runner's `.env`) runs after every job and, scoped to that runner user: wipes
+`~/.docker/config.json` + `containers/auth.json` (so each job starts clean),
+removes leftover `/tmp` scratch it owns, drops stopped containers, and — only
+when the storage FS is ≥ `CLEANUP_DISK_PCT` (default 80%) — full-prunes that
+user's unused images + build cache + volumes. See *Disk / image cleanup* below.
+Symptom if the auth wipe ever regresses:
 `Requesting bearer token: invalid status code from registry 403 (Forbidden)` at
 "Initialize containers", even though the image is public and pulls anonymously
 elsewhere. Manual clear: `rm -f ~runner-N/.docker/config.json
@@ -236,17 +240,27 @@ and will 403. Let `container:` pull it anonymously.
 
 ## Disk / image cleanup
 
-Persistent runners accumulate pulled base images and `buildah --layers` cache.
-`podman-prune.timer` runs `podman-prune.sh` daily (~04:30, randomized):
+Persistent runners accumulate pulled base images, `buildah --layers` cache, and
+`/tmp` build scratch. Reclaim happens at two cadences:
 
-- **Light prune always** — dangling images, stopped containers, build cache
-  older than `PRUNE_KEEP_HOURS` (default 168h/7d). The age filter keeps the hot
-  arc-runners base image + recent build cache, so normal builds stay fast.
-- **Full prune only under disk pressure** — if the storage FS is ≥
-  `PRUNE_DISK_PCT` (default 75%), also drops all unused images + volumes.
+1. **Per job** — `job-completed-cleanup.sh` (above) reclaims after *every* job:
+   user-owned `/tmp` scratch + stopped containers always, and a full image/cache/
+   volume prune once the FS crosses `CLEANUP_DISK_PCT` (default 80%). This catches
+   disk pressure within one job instead of waiting for the timer.
+2. **Backstop timer** — `podman-prune.timer` runs `podman-prune.sh` every 6h
+   (:30, randomized):
+   - **Light prune always** — dangling images, stopped containers, build cache
+     older than `PRUNE_KEEP_HOURS` (default 168h/7d). The age filter keeps the hot
+     arc-runners base image + recent build cache, so normal builds stay fast.
+   - **Full prune only under disk pressure** — if the storage FS is ≥
+     `PRUNE_DISK_PCT` (default 75%), also drops all unused images + volumes.
 
-Safe to run during jobs (prune only removes *unused* resources). Tune via the
-env vars on the service, or run on demand:
+`runner-health-watch.sh` also WARNs (and webhooks, if configured) once the
+storage FS crosses `DISK_WARN` (default 80%) — the early signal a filling disk
+otherwise lacks, since it leaves the cgroups healthy until jobs start failing.
+
+Prunes are safe to run during jobs (only *unused*, per-user resources are
+removed). Tune via the env vars on the service, or run on demand:
 
 ```bash
 systemctl start podman-prune.service        # run now

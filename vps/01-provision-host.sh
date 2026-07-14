@@ -135,7 +135,8 @@ EOF
 
 # --- periodic container-storage prune ------------------------------------
 # Persistent runners accumulate pulled base images + buildah --layers cache.
-# A daily timer reclaims stale storage (full prune only under disk pressure).
+# A 6-hourly timer reclaims stale storage (full prune only under disk pressure);
+# the per-job cleanup hook does the frequent reclaim.
 log "podman-prune timer (reclaim rootless image storage)"
 cat > /etc/systemd/system/podman-prune.service <<'EOF'
 [Unit]
@@ -149,10 +150,10 @@ IOSchedulingClass=idle
 EOF
 cat > /etc/systemd/system/podman-prune.timer <<'EOF'
 [Unit]
-Description=Daily rootless container storage prune
+Description=Rootless container storage prune (every 6h)
 
 [Timer]
-OnCalendar=*-*-* 04:30:00
+OnCalendar=*-*-* 00/6:30:00
 RandomizedDelaySec=20min
 Persistent=true
 
