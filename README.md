@@ -177,10 +177,20 @@ template:
 > `kernel.apparmor_restrict_unprivileged_userns=1`, which denies the `uid_map`
 > write (even a bare `unshare -U -r` fails) regardless of caps or AppArmor profile
 > on the *pod*. It's an **unnamespaced node sysctl**, so no `securityContext` can
-> re-grant it — either set `kernel.apparmor_restrict_unprivileged_userns=0` on the
-> node (sysctl or kernel cmdline), or run the runner `privileged: true`
-> (CAP_SYS_ADMIN satisfies the restriction). Tell them apart by reading
+> re-grant it. Tell it apart from a pod-security problem by reading
 > `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` on the runner.
+>
+> **The rootless fix is to flip the node sysctl, not to go privileged.** Set
+> `kernel.apparmor_restrict_unprivileged_userns=0` on each runner node (a
+> `sysctl.d` drop-in, kernel cmdline, or — the GitOps-native way — a small
+> privileged node-tuning DaemonSet that `sysctl -w`s it on every node). The runner
+> pod then stays **non-privileged**: `runAsUser: 1001`,
+> `allowPrivilegeEscalation: true`, `capabilities.add: [SETUID, SETGID]`, AppArmor
+> + seccomp `Unconfined` — a `baseline`-PSS pod, not a privileged one. Running the
+> runner `privileged: true` also works (CAP_SYS_ADMIN bypasses the restriction) but
+> it is a *strictly larger* privilege grant than fixing the one node sysctl, so
+> prefer the sysctl. Whichever you pick, apply it to **every** node a runner can
+> schedule onto.
 
 ### `podman compose` needs container DNS (netavark)
 
