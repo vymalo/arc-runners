@@ -104,6 +104,21 @@
     opts: sw
     state: present
 
+# ---- /tmp on disk, NOT a RAM tmpfs ---------------------------------------
+# Debian trixie defaults /tmp to a tmpfs sized ~50% of RAM (systemd's static
+# tmp.mount). Wrong for this workload: CI build steps mktemp -d multi-GB scratch
+# (Next.js standalone node_modules) into /tmp and hit "No space left on device"
+# at the tmpfs size while the DISK sits near-empty (the disk-full incident), and
+# leftover scratch pins RAM on these swap=0 boxes. Masking tmp.mount moves /tmp
+# onto the root disk (100s of GB) and frees the RAM. See arc-runners#22.
+# NOTE: the live tmpfs persists until the host REBOOTS — this only guarantees a
+# disk-backed /tmp after the next boot (and on a fresh build). Reboot is manual
+# (drain jobs first); not triggered here so job timing stays operator-controlled.
+- name: Move /tmp off tmpfs onto disk (mask systemd tmp.mount)
+  ansible.builtin.systemd:
+    name: tmp.mount
+    masked: true
+
 # ---- sysctl for CI workloads (inotify / map_count / sockets / userns) --------
 - name: sysctl tuning for CI workloads
   ansible.builtin.copy:

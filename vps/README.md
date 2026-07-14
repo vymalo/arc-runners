@@ -240,6 +240,16 @@ and will 403. Let `container:` pull it anonymously.
 
 ## Disk / image cleanup
 
+**`/tmp` is on the disk, not a RAM tmpfs.** Debian trixie defaults `/tmp` to a
+tmpfs sized ~50% of RAM; CI builds `mktemp -d` multi-GB scratch there and hit
+`No space left on device` at the tmpfs size while the disk is near-empty (the
+disk-full incident), and leftover scratch pins RAM on these `swap=0` boxes. The
+`provision_host` role masks `systemd tmp.mount` so `/tmp` lives on the root disk
+(100s of GB). **The mask only takes effect after a reboot** — arm it with the
+playbook, then reboot each host (drain jobs first), e.g.
+`ssh <host> 'systemctl reboot'`. Verify with `findmnt /tmp` (should report no
+separate mount / the disk device, not `tmpfs`).
+
 Persistent runners accumulate pulled base images, `buildah --layers` cache, and
 `/tmp` build scratch. Reclaim happens at two cadences:
 
