@@ -4,11 +4,12 @@
     daemon_reload: true
 
 - name: Reload sysctl
-  # -e / --ignore: don't error on unknown keys. 99-ci-runners.conf carries
+  # -e (== --ignore): don't error on unknown keys. 99-ci-runners.conf carries
   # kernel.apparmor_restrict_unprivileged_userns, whose /proc node does NOT exist
   # on Debian 12 (bookworm) kernels — without -e, `sysctl --system` returns
   # non-zero there and fails the converge on exactly the hosts where the key is a
-  # harmless no-op. systemd-sysctl applies the same file at boot and likewise just
-  # warns on the missing key, so persistence is unaffected.
-  ansible.builtin.command: sysctl --system --ignore
+  # harmless no-op. -e (the short form, supported by even pre-ng procps) is used
+  # over the long --ignore for portability. systemd-sysctl applies the same file
+  # at boot and likewise just warns on the missing key, so persistence is unaffected.
+  ansible.builtin.command: sysctl --system -e
   changed_when: false
