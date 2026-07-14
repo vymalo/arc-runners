@@ -139,7 +139,9 @@ check_fs() {
   [[ -e "$path" ]] || return 0
   pct=$(df --output=pcent "$path" 2>/dev/null | tail -1 | tr -dc '0-9')
   [[ -n "$pct" ]] || return 0
-  if (( pct >= DISK_WARN )); then
+  # 10# forces base-10 so an operator-set leading-zero DISK_WARN (e.g. 08) can't
+  # trip bash's octal parser; df never zero-pads, so $pct is always plain.
+  if (( 10#$pct >= 10#$DISK_WARN )); then
     local msg="UNHEALTHY ${label}: ${path} at ${pct}% used (>=${DISK_WARN}%)"
     log warning "$msg"
     warnings+=("$msg")

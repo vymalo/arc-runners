@@ -60,9 +60,12 @@ pod container prune -f
 # volumes for this user. Accepts a cold re-pull/rebuild next run — far cheaper
 # than a job failing on a full disk. Nothing is meant to persist across jobs on
 # an ephemeral-style runner, so unused volumes are fair game.
-usage=$(df --output=pcent /home 2>/dev/null | tail -1 | tr -dc '0-9')
-[[ -n "$usage" ]] || usage=$(df --output=pcent / | tail -1 | tr -dc '0-9')
-if [[ -n "$usage" ]] && (( usage >= DISK_PCT )); then
+# Query the runner user's own $HOME — where its rootless store lives — so we
+# check the right FS without assuming the host's /home layout. 10# forces base-10
+# so an operator-set leading-zero threshold (e.g. DISK_PCT=08) can't trip bash's
+# octal parser (df itself never zero-pads, so $usage is always plain like "8").
+usage=$(df --output=pcent "${HOME:-/}" 2>/dev/null | tail -1 | tr -dc '0-9')
+if [[ -n "$usage" ]] && (( 10#$usage >= 10#$DISK_PCT )); then
   pod system prune -af --volumes
 fi
 
