@@ -16,13 +16,17 @@
 #      every job makes each job start clean (jobs that need a registry log in
 #      themselves), exactly like an ephemeral runner would.
 #
-#   2. RECLAIM DISK. Persistent runners accumulate: this user's rootless podman
-#      store (images/build cache/volumes) plus leftover /tmp scratch from build
-#      steps that mktemp -d and never clean up (a full disk is what makes
-#      `container:` builds die with "No space left on device" — see arc-runners
-#      disk-full incident). Mirrors podman-prune.sh's "light always, full only
-#      under disk pressure" policy, but at PER-JOB frequency so pressure is caught
-#      within one job instead of waiting for the daily 04:30 prune window.
+#   2. RECLAIM SPACE. Persistent runners accumulate two things:
+#      a) leftover /tmp scratch from build steps that `mktemp -d` and never clean
+#         up. /tmp is a RAM-backed tmpfs on Debian trixie (~50% of RAM), so this
+#         scratch fills the tmpfs AND permanently pins RAM. A full /tmp is what
+#         makes `container:` builds die with "No space left on device" even though
+#         the disk has hundreds of GB free — the actual disk-full incident cause.
+#         Swept unconditionally below (this user's entries only).
+#      b) this user's rootless podman store (images/build cache/volumes) on the
+#         disk under /home. Mirrors podman-prune.sh's "light always, full only
+#         under disk pressure" policy, but at PER-JOB frequency so pressure is
+#         caught within one job instead of waiting for the prune timer window.
 #
 # Root-owned + only referenced by path, so a job can't tamper with this script.
 set +e
