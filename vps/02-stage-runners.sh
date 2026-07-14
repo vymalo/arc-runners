@@ -194,6 +194,14 @@ Environment=DOCKER_HOST=unix:///var/run/docker.sock
 # with 'statfs /var/run/docker.sock: no such file or directory'. Give this
 # runner a PRIVATE mount namespace where that target is its own rootless
 # socket — per-runner, no cross-user conflict, stays rootless.
+# podman's tmpfiles.d ships 'D! /run/podman 0700 root root', so after every boot
+# that directory is 0700 root and the rootless runner user cannot traverse into
+# it to reach the BindPaths-mounted socket — container: jobs then die at 'docker
+# create' with 'statfs /var/run/docker.sock: permission denied' (distinct from the
+# dangling-symlink case above). Make it traversable before the agent + jobs run;
+# the socket itself stays 0770 runner-owned, so a 0755 dir exposes nothing. '+'
+# runs as root, outside the User= the unit drops to.
+ExecStartPre=+/usr/bin/install -d -m 0755 /run/podman
 BindPaths=${RTD}/podman/podman.sock:/run/podman/podman.sock
 EOF
 
