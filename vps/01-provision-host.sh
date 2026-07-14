@@ -79,6 +79,14 @@ else
   echo "swap already present"
 fi
 
+# --- /tmp on disk, NOT a RAM tmpfs ---------------------------------------
+# Debian trixie defaults /tmp to a tmpfs (~50% RAM). CI builds mktemp -d multi-GB
+# scratch there and hit ENOSPC at the tmpfs size while the DISK is near-empty (the
+# disk-full incident), and leftover scratch pins RAM on these swap=0 boxes. Mask
+# tmp.mount so /tmp lives on disk. Takes effect on next reboot. See arc-runners#22.
+log "tmp on disk (mask tmpfs tmp.mount)"
+systemctl mask tmp.mount >/dev/null 2>&1 || true
+
 # --- sysctl tuning for CI workloads --------------------------------------
 log "sysctl (inotify / map_count / sockets for CI)"
 cat > /etc/sysctl.d/99-ci-runners.conf <<'EOF'
@@ -135,7 +143,8 @@ EOF
 
 # --- periodic container-storage prune ------------------------------------
 # Persistent runners accumulate pulled base images + buildah --layers cache.
-# A daily timer reclaims stale storage (full prune only under disk pressure).
+# A 6-hourly timer reclaims stale storage (full prune only under disk pressure);
+# the per-job cleanup hook does the frequent reclaim.
 log "podman-prune timer (reclaim rootless image storage)"
 cat > /etc/systemd/system/podman-prune.service <<'EOF'
 [Unit]
@@ -149,10 +158,10 @@ IOSchedulingClass=idle
 EOF
 cat > /etc/systemd/system/podman-prune.timer <<'EOF'
 [Unit]
-Description=Daily rootless container storage prune
+Description=Rootless container storage prune (every 6h)
 
 [Timer]
-OnCalendar=*-*-* 04:30:00
+OnCalendar=*-*-* 00/6:30:00
 RandomizedDelaySec=20min
 Persistent=true
 

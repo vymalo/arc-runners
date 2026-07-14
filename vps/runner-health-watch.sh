@@ -24,6 +24,7 @@ set -uo pipefail
 
 # ---- tunables (override via /etc/runner-health-watch.env) ----------------
 PSI_WARN="${PSI_WARN:-20}"          # WARN when memory PSI "some avg60" >= this (%)
+DISK_WARN="${DISK_WARN:-80}"        # WARN when the storage FS is >= this (% used)
 STATE_DIR="${STATE_DIR:-/run/runner-health-watch}"   # tmpfs: oom_kill baselines
 WEBHOOK_URL="${WEBHOOK_URL:-}"      # optional: POST a JSON alert on WARN
 CG_ROOT=/sys/fs/cgroup
@@ -123,6 +124,31 @@ for svc_cg in "$CG_ROOT"/runners.slice/actions.runner.*.service; do
     [[ -n "$uid" ]] && check_cgroup "user:${user}" "$CG_ROOT/user.slice/user-${uid}.slice"
   fi
 done
+
+# ---- filesystem pressure: image store (disk) AND /tmp build scratch -------
+# Two distinct "No space left on device" surfaces, both invisible to the cgroup
+# checks above (a full FS leaves memory PSI/OOM healthy):
+#   * the rootless image store on the disk under /home (podman pulls + cache); and
+#   * /tmp — on Debian trixie a RAM-backed tmpfs (sized ~50% of RAM). CI builds
+#     dump multi-GB scratch (Next.js standalone node_modules) there and hit ENOSPC
+#     at the tmpfs size while the DISK still has hundreds of GB free. This was the
+#     actual cause of the disk-full incident, and the disk-% check alone missed it.
+# Reclaim is done by the per-job cleanup hook + prune timer; this only reports.
+check_fs() {
+  local label="$1" path="$2" pct
+  [[ -e "$path" ]] || return 0
+  pct=$(df --output=pcent "$path" 2>/dev/null | tail -1 | tr -dc '0-9')
+  [[ -n "$pct" ]] || return 0
+  # 10# forces base-10 so an operator-set leading-zero DISK_WARN (e.g. 08) can't
+  # trip bash's octal parser; df never zero-pads, so $pct is always plain.
+  if (( 10#$pct >= 10#$DISK_WARN )); then
+    local msg="UNHEALTHY ${label}: ${path} at ${pct}% used (>=${DISK_WARN}%)"
+    log warning "$msg"
+    warnings+=("$msg")
+  fi
+}
+check_fs disk "$([[ -d /home ]] && echo /home || echo /)"
+check_fs tmpfs-tmp /tmp
 
 # ---- optional webhook on any WARN ----------------------------------------
 if (( ${#warnings[@]} > 0 )) && [[ -n "$WEBHOOK_URL" ]]; then

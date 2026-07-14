@@ -1,8 +1,12 @@
 [Unit]
-Description=Daily rootless container storage prune
+Description=Rootless container storage prune (every 6h)
 
 [Timer]
-OnCalendar=*-*-* 04:30:00
+# Every 6h, not daily: the per-job cleanup hook does the frequent reclaim, but
+# this backstop sweep of aged (>168h) cache should not sit idle for a full day on
+# a low-traffic host. Its full-prune-under-pressure branch is now reachable
+# intraday too. Keep the jitter so multiple hosts don't prune in lockstep.
+OnCalendar=*-*-* 00/6:30:00
 RandomizedDelaySec=20min
 Persistent=true
 
