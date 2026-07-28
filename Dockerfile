@@ -135,6 +135,13 @@ ARG ARGOCD_VERSION=3.4.4
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 ARG FASTLANE_CONSTRAINT="~> 2.236"
+# Quality pipeline tools (linting/analysis): Semgrep, Hadolint, Actionlint, jscpd, reviewdog
+# Pinned to versions with verified binary downloads (not bleeding-edge latest which may lack binaries).
+ARG SEMGREP_VERSION=1.87.0
+ARG HADOLINT_VERSION=2.14.0
+ARG ACTIONLINT_VERSION=1.7.10
+ARG JSCPD_VERSION=4.1.0
+ARG REVIEWDOG_VERSION=0.20.2
 
 # ---- System packages --------------------------------------------------
 # build-base/headers for the cargo workspace (aws-lc-sys, ring,
@@ -447,6 +454,38 @@ RUN set -eux; \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh; \
     rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64"; \
     gh --version
+
+# ---- Quality pipeline tools: Semgrep (via pip), Hadolint, Actionlint, jscpd, reviewdog ----
+# Static analysis + linting tools baked in (no per-job downloads).
+# Semgrep is installed via pip (upstream dropped binary releases).
+RUN set -eux; \
+    apt-get update -y; \
+    apt-get install -y --no-install-recommends python3-pip; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m pip install --break-system-packages --no-cache-dir "semgrep==${SEMGREP_VERSION}"; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64" \
+      -o /usr/local/bin/hadolint; \
+    chmod 0755 /usr/local/bin/hadolint; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/actionlint.tar.gz; \
+    tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint; \
+    chmod 0755 /usr/local/bin/actionlint; \
+    rm -f /tmp/actionlint.tar.gz; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/reviewdog/reviewdog/releases/download/v${REVIEWDOG_VERSION}/reviewdog_${REVIEWDOG_VERSION}_Linux_x86_64.tar.gz" \
+      -o /tmp/reviewdog.tar.gz; \
+    tar -xzf /tmp/reviewdog.tar.gz -C /usr/local/bin reviewdog; \
+    chmod 0755 /usr/local/bin/reviewdog; \
+    rm -f /tmp/reviewdog.tar.gz; \
+    semgrep --version; hadolint --version; actionlint -version; reviewdog -version
+
+# ---- jscpd (global npm package) -----------------------------------------------
+# Installed globally via npm (after Node.js is available).
+RUN set -eux; \
+    npm install -g "jscpd@${JSCPD_VERSION}"; \
+    jscpd --version
 
 # ---- Everything below runs AS the runner user -------------------------
 # rustup/cargo metadata lands in /home/runner/{.cargo,.rustup} (the
