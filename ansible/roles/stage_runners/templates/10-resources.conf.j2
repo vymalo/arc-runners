@@ -31,4 +31,12 @@ Environment=DOCKER_HOST=unix:///var/run/docker.sock
 # GitHub bind-mounts /var/run/docker.sock into every container: job; podman-docker
 # symlinks that to the ROOTFUL socket (which we don't run), so it dangles. Give
 # this runner a private mount ns where the target is its own rootless socket.
+# podman's tmpfiles.d ships `D! /run/podman 0700 root root`, so after every boot
+# that directory is 0700 root — the rootless runner user can't traverse into it
+# to reach the BindPaths-mounted socket, and container: jobs die at `docker
+# create` with `statfs /var/run/docker.sock: permission denied` (distinct from the
+# dangling-symlink `no such file or directory` above). Make it traversable before
+# the agent + its jobs run; the socket itself stays 0770 runner-owned, so a 0755
+# dir exposes nothing. `+` runs as root, outside the User= the unit drops to.
+ExecStartPre=+/usr/bin/install -d -m 0755 /run/podman
 BindPaths={{ r_rtd }}/podman/podman.sock:/run/podman/podman.sock

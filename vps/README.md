@@ -177,6 +177,16 @@ at each runner's rootless socket (injected via the runner's `.env`), so plain
 > that resolves it to that runner's own rootless socket. Fully rootless, no
 > cross-runner conflict.
 >
+> **Why the `ExecStartPre` chmod exists.** podman's `tmpfiles.d` ships
+> `D! /run/podman 0700 root root`, so after every boot the directory the socket is
+> bound *inside* is `0700 root`. The rootless runner user then can't traverse into
+> it to reach the bound socket, and `docker create` fails with
+> `statfs /var/run/docker.sock: permission denied` (a *different* error from the
+> dangling-symlink `no such file or directory` above — the bind is fine, the parent
+> dir isn't). `ExecStartPre=+/usr/bin/install -d -m 0755 /run/podman` makes the dir
+> traversable before the agent starts; the socket itself stays `0770` and
+> runner-owned, so the `0755` dir exposes nothing.
+>
 > **Docker-in-docker caveat:** the mounted socket is owned by the host runner
 > user, which maps to *root* inside the rootless container. A workflow step that
 > shells out to `docker`/`podman` *from inside* the job container therefore needs
