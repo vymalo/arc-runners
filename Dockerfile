@@ -111,6 +111,15 @@ ARG FRB_VERSION=2.12.0
 # cratestack-cli tracks the consuming project's cratestack version
 # (resolved from crates.io). Keep it in lockstep with that pin.
 ARG CRATESTACK_VERSION=0.4.8
+# cargo-binstall. Pinned to a GitHub release TAG, NOT the upstream
+# install-from-binstall-release.sh script fetched from `main` (that script
+# has no version anywhere and can change behavior on any upstream commit —
+# silently, unlike the `mc` 410 above, which at least failed loudly). Piping
+# that script straight into `bash` is also a supply-chain surface: arbitrary
+# upstream code executing during the image build with GITHUB_TOKEN in scope.
+# Downloading the pinned release asset directly removes the shell pipe and
+# pins the binary in one move. Bump this deliberately when needed.
+ARG CARGO_BINSTALL_VERSION=v1.23.0
 ARG ANDROID_CMDLINE_TOOLS=15641748
 # Latest STABLE platform + build-tools, resolved from Google's package
 # manifest filtered to the stable channel (channel-0):
@@ -610,9 +619,19 @@ RUN --mount=type=secret,id=github_token \
     if [ -s /run/secrets/github_token ]; then \
       export GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
     fi; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
-      https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
-      | bash; \
+    # Pinned release asset, not `curl .../main/install-from-binstall-release.sh
+    # | bash` — see the CARGO_BINSTALL_VERSION ARG comment above for why. The
+    # tgz's single root entry is the `cargo-binstall` binary itself; it lands
+    # in CARGO_HOME/bin (already on PATH, matching the upstream script's own
+    # `${CARGO_HOME:-$HOME/.cargo}/bin` default) so `cargo binstall` below finds it.
+    tmp_binstall="$(mktemp -d)"; \
+    curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp_binstall}/cargo-binstall.tgz" \
+      "https://github.com/cargo-bins/cargo-binstall/releases/download/${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz"; \
+    tar -xzf "${tmp_binstall}/cargo-binstall.tgz" -C "${tmp_binstall}"; \
+    mkdir -p "${CARGO_HOME}/bin"; \
+    install -m 0755 "${tmp_binstall}/cargo-binstall" "${CARGO_HOME}/bin/cargo-binstall"; \
+    rm -rf "${tmp_binstall}"; \
+    cargo binstall -V; \
     cargo binstall -y --locked \
        cargo-llvm-cov \
        just \
