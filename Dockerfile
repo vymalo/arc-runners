@@ -111,6 +111,15 @@ ARG FRB_VERSION=2.12.0
 # cratestack-cli tracks the consuming project's cratestack version
 # (resolved from crates.io). Keep it in lockstep with that pin.
 ARG CRATESTACK_VERSION=0.4.8
+# cargo-binstall. Pinned to a GitHub release TAG, NOT the upstream
+# install-from-binstall-release.sh script fetched from `main` (that script
+# has no version anywhere and can change behavior on any upstream commit —
+# silently, unlike the `mc` 410 above, which at least failed loudly). Piping
+# that script straight into `bash` is also a supply-chain surface: arbitrary
+# upstream code executing during the image build with GITHUB_TOKEN in scope.
+# Downloading the pinned release asset directly removes the shell pipe and
+# pins the binary in one move. Bump this deliberately when needed.
+ARG CARGO_BINSTALL_VERSION=v1.23.0
 ARG ANDROID_CMDLINE_TOOLS=15641748
 # Latest STABLE platform + build-tools, resolved from Google's package
 # manifest filtered to the stable channel (channel-0):
@@ -127,6 +136,16 @@ ARG KUBECTL_VERSION=1.36.2
 # compatibility (https://helm.sh/docs/overview/), so existing charts work.
 ARG HELM_VERSION=4.2.2
 ARG ARGOCD_VERSION=3.4.4
+# mc (MinIO Client). Pinned to a GitHub release asset, NOT the old
+# https://dl.min.io/client/mc/release/linux-amd64/mc "latest" endpoint —
+# MinIO retired that public download path and it now returns 410 Gone.
+# That URL had no version pin, so the break was silent until the next
+# image build actually ran curl against it: main was last green on
+# 2026-07-28, and the breakage sat latent for ~7 weeks before PR #32
+# (unrelated DLL-patch work) became the first build to hit it. Pinning
+# to a specific release tag means the next break is a deliberate
+# version bump, not a surprise mid-build 410.
+ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # GitHub CLI (cli/cli). Used by workflows for `gh` API calls / releases / PR ops;
 # NOT in the actions-runner base (GitHub-hosted ubuntu bundles it, this image must
 # bake it). gh ships no per-asset .sha256 — the release publishes a combined
@@ -199,6 +218,88 @@ RUN apt-get update -y \
     && git-lfs --version
 
 ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_VERSION}-openjdk-amd64
+
+# ---- actions/cache v4 cache-server compatibility patch (Runner.Worker.dll) ---
+# actions/cache v4.2+ talks to GitHub's Cache Service v2 over the
+# ACTIONS_RESULTS_URL env var — but Runner.Worker overwrites that variable
+# from the job context on every job, so setting it on the runner pod (env,
+# workflow, or ARC RunnerSet spec) is silently ignored; there is no supported
+# runner-side config to override it. The accepted workaround, from the
+# github-actions-cache-server project, is a byte-level rename of the
+# UTF-16LE string ACTIONS_RESULTS_URL -> ACTIONS_RESULTS_ORL inside
+# Runner.Worker.dll: once the runner's own lookup can no longer find the
+# variable by that name, it stops clobbering the pod-supplied value, and
+# actions/cache actually talks to a self-hosted cache server instead of
+# always falling through to github.com.
+# See https://github.com/falcondev-oss/github-actions-cache-server for the
+# cache server and the origin of this patch.
+#
+# DO NOT trust that a byte patch like this silently applied. The upstream
+# project's OWN pre-patched runner image shipped this exact patch MISSING
+# from the compiled DLL in releases 2.335.1, 2.336.0 and 2.337.0 — see
+# https://github.com/falcondev-oss/github-actions-cache-server/issues/265
+# (open at the time of writing). The failure mode is a silent no-op: no
+# error anywhere, the cache server just receives zero requests and
+# actions/cache quietly falls back to github.com every time. That is exactly
+# why this is a build-time ASSERTION, not a best-effort sed: the script
+# below counts occurrences of the UTF-16LE pattern BEFORE patching (must be
+# exactly 1 — 0 means upstream renamed/removed the string, >1 means the
+# "single call site" assumption this patch depends on no longer holds;
+# either way a human must re-verify against the issue above before this
+# ships) and again AFTER patching (original pattern gone, patched string
+# present exactly once), printing a one-line confirmation on success.
+# Verified once against ghcr.io/actions/actions-runner:latest (linux/amd64):
+# a 636416-byte DLL with exactly 1 UTF-16LE occurrence of
+# ACTIONS_RESULTS_URL, 0 plain-ASCII occurrences, and pattern/replacement
+# both 38 bytes — equal length, so the patch cannot shift any other offset
+# in the DLL. Re-verify this whenever the base image tag moves; the
+# assertion below fails the build loudly the moment it stops applying,
+# which is the point.
+#
+# Placed here (root, right after the base system packages, before any
+# ecosystem-specific tooling) because it patches a base-image-vendored
+# binary that has nothing to do with Rust/Node/Flutter/Android/etc. below —
+# it only needs USER root, which every layer down to `USER runner` still has.
+#
+# python3 (already present in the Ubuntu 24.04 base — no extra apt package
+# needed) does the byte search-and-replace instead of sed/grep: UTF-16LE
+# text is full of NUL bytes, and `grep -c`/`sed` byte-counting against
+# binary content is unreliable (locale/line-buffering assumptions that don't
+# hold for arbitrary binary); Python's bytes.count() has no such ambiguity.
+RUN set -eux; \
+    printf '%s\n' \
+      'import sys' \
+      '' \
+      'path = "/home/runner/bin/Runner.Worker.dll"' \
+      'old = "ACTIONS_RESULTS_URL".encode("utf-16-le")' \
+      'new = "ACTIONS_RESULTS_ORL".encode("utf-16-le")' \
+      'assert len(old) == len(new), "pattern/replacement length mismatch -- would shift file offsets"' \
+      '' \
+      'data = open(path, "rb").read()' \
+      'count = data.count(old)' \
+      'if count != 1:' \
+      '    sys.exit(' \
+      '        "FATAL: expected exactly 1 UTF-16LE occurrence of ACTIONS_RESULTS_URL in "' \
+      '        + path + ", found " + str(count) + ". 0 means upstream renamed or removed "' \
+      '        "the string; >1 means the single-site assumption behind this patch no "' \
+      '        "longer holds. A human must re-verify against "' \
+      '        "https://github.com/falcondev-oss/github-actions-cache-server/issues/265 "' \
+      '        "before proceeding."' \
+      '    )' \
+      '' \
+      'open(path, "wb").write(data.replace(old, new))' \
+      '' \
+      'verify = open(path, "rb").read()' \
+      'if verify.count(old) != 0 or verify.count(new) != 1:' \
+      '    sys.exit("FATAL: post-patch verification failed for " + path)' \
+      '' \
+      'print(' \
+      '    "OK: patched " + path + " (" + str(len(old)) + " bytes) -- renamed "' \
+      '    "ACTIONS_RESULTS_URL to ACTIONS_RESULTS_ORL, 1 occurrence, no byte-offset shift"' \
+      ')' \
+      > /tmp/patch-runner-worker-dll.py; \
+    python3 /tmp/patch-runner-worker-dll.py; \
+    rm -f /tmp/patch-runner-worker-dll.py
 
 # ---- Rootless container build (Buildah) + run (Podman) — replaces dind -------
 # Daemonless + rootless: jobs build images (buildah) and run compose stacks
@@ -438,7 +539,7 @@ RUN set -eux; \
       -o /usr/local/bin/argocd; \
     chmod 0755 /usr/local/bin/argocd; \
     curl --proto '=https' --tlsv1.2 -fsSL \
-      "https://dl.min.io/client/mc/release/linux-amd64/mc" \
+      "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64.${MC_VERSION}" \
       -o /usr/local/bin/mc; \
     chmod 0755 /usr/local/bin/mc; \
     kubectl version --client; helm version; argocd version --client; mc --version
@@ -518,9 +619,19 @@ RUN --mount=type=secret,id=github_token \
     if [ -s /run/secrets/github_token ]; then \
       export GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
     fi; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
-      https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
-      | bash; \
+    # Pinned release asset, not `curl .../main/install-from-binstall-release.sh
+    # | bash` — see the CARGO_BINSTALL_VERSION ARG comment above for why. The
+    # tgz's single root entry is the `cargo-binstall` binary itself; it lands
+    # in CARGO_HOME/bin (already on PATH, matching the upstream script's own
+    # `${CARGO_HOME:-$HOME/.cargo}/bin` default) so `cargo binstall` below finds it.
+    tmp_binstall="$(mktemp -d)"; \
+    curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp_binstall}/cargo-binstall.tgz" \
+      "https://github.com/cargo-bins/cargo-binstall/releases/download/${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz"; \
+    tar -xzf "${tmp_binstall}/cargo-binstall.tgz" -C "${tmp_binstall}"; \
+    mkdir -p "${CARGO_HOME}/bin"; \
+    install -m 0755 "${tmp_binstall}/cargo-binstall" "${CARGO_HOME}/bin/cargo-binstall"; \
+    rm -rf "${tmp_binstall}"; \
+    cargo binstall -V; \
     cargo binstall -y --locked \
        cargo-llvm-cov \
        just \
