@@ -127,6 +127,16 @@ ARG KUBECTL_VERSION=1.36.2
 # compatibility (https://helm.sh/docs/overview/), so existing charts work.
 ARG HELM_VERSION=4.2.2
 ARG ARGOCD_VERSION=3.4.4
+# mc (MinIO Client). Pinned to a GitHub release asset, NOT the old
+# https://dl.min.io/client/mc/release/linux-amd64/mc "latest" endpoint —
+# MinIO retired that public download path and it now returns 410 Gone.
+# That URL had no version pin, so the break was silent until the next
+# image build actually ran curl against it: main was last green on
+# 2026-07-28, and the breakage sat latent for ~7 weeks before PR #32
+# (unrelated DLL-patch work) became the first build to hit it. Pinning
+# to a specific release tag means the next break is a deliberate
+# version bump, not a surprise mid-build 410.
+ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # GitHub CLI (cli/cli). Used by workflows for `gh` API calls / releases / PR ops;
 # NOT in the actions-runner base (GitHub-hosted ubuntu bundles it, this image must
 # bake it). gh ships no per-asset .sha256 — the release publishes a combined
@@ -520,7 +530,7 @@ RUN set -eux; \
       -o /usr/local/bin/argocd; \
     chmod 0755 /usr/local/bin/argocd; \
     curl --proto '=https' --tlsv1.2 -fsSL \
-      "https://dl.min.io/client/mc/release/linux-amd64/mc" \
+      "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64.${MC_VERSION}" \
       -o /usr/local/bin/mc; \
     chmod 0755 /usr/local/bin/mc; \
     kubectl version --client; helm version; argocd version --client; mc --version
