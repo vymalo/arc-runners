@@ -52,6 +52,7 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 | **Mobile release** | Ruby + bundler + fastlane |
 | **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client), `gh` (GitHub CLI) |
 | **Pre-commit** | `pre-commit` (via pipx) |
+| **Runner patch** | `Runner.Worker.dll` byte-patched so `ACTIONS_RESULTS_URL` survives — see [GitHub Actions cache server compatibility](#github-actions-cache-server-compatibility-actions_results_url-patch) |
 
 ### Pinned versions
 
@@ -267,6 +268,58 @@ Actions variables/secrets (or pod env), e.g. `RUSTC_WRAPPER=sccache` with an
 S3-compatible backend (`SCCACHE_BUCKET` / `SCCACHE_ENDPOINT` / AWS-style keys).
 Everything is fail-open: unset values simply disable that cache. Substitute your
 own endpoint and a dedicated, bucket-scoped key — do not commit credentials.
+
+## GitHub Actions cache server compatibility (`ACTIONS_RESULTS_URL` patch)
+
+`actions/cache` v4.2+ talks to GitHub's Cache Service v2 over the
+`ACTIONS_RESULTS_URL` environment variable. Normally that variable is set by
+the runner from the job context, and **the runner overwrites any value you set
+on the pod** — so pointing a self-hosted [github-actions-cache-server
+](https://github.com/falcondev-oss/github-actions-cache-server) at your jobs by
+just setting `ACTIONS_RESULTS_URL` in the RunnerSet spec silently does nothing;
+`actions/cache` keeps talking to github.com and the cache server sees zero
+traffic, with no error anywhere.
+
+To fix this, the `Dockerfile` applies the byte-level patch documented by that
+project: it renames the UTF-16LE string `ACTIONS_RESULTS_URL` to
+`ACTIONS_RESULTS_ORL` inside the vendored `Runner.Worker.dll`, so the runner's
+own lookup no longer finds the variable and stops clobbering it. The build
+**asserts** the patch actually applied (counts the pattern before and after,
+fails loudly on any count other than the expected one) — this is not
+optional caution: the upstream project's own pre-patched runner image shipped
+this exact patch *silently missing* from the compiled DLL in three releases in
+a row ([falcondev-oss/github-actions-cache-server#265
+](https://github.com/falcondev-oss/github-actions-cache-server/issues/265),
+open at the time of writing), and the only symptom was the cache server
+receiving no requests.
+
+**To use it**, run the [github-actions-cache-server
+](https://github.com/falcondev-oss/github-actions-cache-server) somewhere your
+runners can reach, then point the RunnerSet's runner container at it — the
+trailing slash is required:
+
+```yaml
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/vymalo/arc-runners:jdk21-node24
+        env:
+          - name: ACTIONS_RESULTS_URL
+            value: "https://cache.internal.example.com/"
+```
+
+> **This is a byte patch against a third-party vendor binary, not a supported
+> integration point.** It is guarded by a build-time assertion, so a base
+> image bump that renames or removes the string (or duplicates the call site)
+> fails the build instead of shipping a silent no-op — but the assertion only
+> checks that the *bytes* still match, not that they still play the same
+> *role*. A future `actions/runner` change could alter what
+> `ACTIONS_RESULTS_URL`'s lookup does without touching its spelling, in which
+> case the build would still pass while the behavior quietly stopped working.
+> Re-verify this patch by hand whenever `ghcr.io/actions/actions-runner` is
+> bumped: the blast radius of it silently failing is cache misses (falls back
+> to github.com), not broken builds.
 
 ## License
 

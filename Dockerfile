@@ -200,6 +200,88 @@ RUN apt-get update -y \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_VERSION}-openjdk-amd64
 
+# ---- actions/cache v4 cache-server compatibility patch (Runner.Worker.dll) ---
+# actions/cache v4.2+ talks to GitHub's Cache Service v2 over the
+# ACTIONS_RESULTS_URL env var — but Runner.Worker overwrites that variable
+# from the job context on every job, so setting it on the runner pod (env,
+# workflow, or ARC RunnerSet spec) is silently ignored; there is no supported
+# runner-side config to override it. The accepted workaround, from the
+# github-actions-cache-server project, is a byte-level rename of the
+# UTF-16LE string ACTIONS_RESULTS_URL -> ACTIONS_RESULTS_ORL inside
+# Runner.Worker.dll: once the runner's own lookup can no longer find the
+# variable by that name, it stops clobbering the pod-supplied value, and
+# actions/cache actually talks to a self-hosted cache server instead of
+# always falling through to github.com.
+# See https://github.com/falcondev-oss/github-actions-cache-server for the
+# cache server and the origin of this patch.
+#
+# DO NOT trust that a byte patch like this silently applied. The upstream
+# project's OWN pre-patched runner image shipped this exact patch MISSING
+# from the compiled DLL in releases 2.335.1, 2.336.0 and 2.337.0 — see
+# https://github.com/falcondev-oss/github-actions-cache-server/issues/265
+# (open at the time of writing). The failure mode is a silent no-op: no
+# error anywhere, the cache server just receives zero requests and
+# actions/cache quietly falls back to github.com every time. That is exactly
+# why this is a build-time ASSERTION, not a best-effort sed: the script
+# below counts occurrences of the UTF-16LE pattern BEFORE patching (must be
+# exactly 1 — 0 means upstream renamed/removed the string, >1 means the
+# "single call site" assumption this patch depends on no longer holds;
+# either way a human must re-verify against the issue above before this
+# ships) and again AFTER patching (original pattern gone, patched string
+# present exactly once), printing a one-line confirmation on success.
+# Verified once against ghcr.io/actions/actions-runner:latest (linux/amd64):
+# a 636416-byte DLL with exactly 1 UTF-16LE occurrence of
+# ACTIONS_RESULTS_URL, 0 plain-ASCII occurrences, and pattern/replacement
+# both 38 bytes — equal length, so the patch cannot shift any other offset
+# in the DLL. Re-verify this whenever the base image tag moves; the
+# assertion below fails the build loudly the moment it stops applying,
+# which is the point.
+#
+# Placed here (root, right after the base system packages, before any
+# ecosystem-specific tooling) because it patches a base-image-vendored
+# binary that has nothing to do with Rust/Node/Flutter/Android/etc. below —
+# it only needs USER root, which every layer down to `USER runner` still has.
+#
+# python3 (already present in the Ubuntu 24.04 base — no extra apt package
+# needed) does the byte search-and-replace instead of sed/grep: UTF-16LE
+# text is full of NUL bytes, and `grep -c`/`sed` byte-counting against
+# binary content is unreliable (locale/line-buffering assumptions that don't
+# hold for arbitrary binary); Python's bytes.count() has no such ambiguity.
+RUN set -eux; \
+    printf '%s\n' \
+      'import sys' \
+      '' \
+      'path = "/home/runner/bin/Runner.Worker.dll"' \
+      'old = "ACTIONS_RESULTS_URL".encode("utf-16-le")' \
+      'new = "ACTIONS_RESULTS_ORL".encode("utf-16-le")' \
+      'assert len(old) == len(new), "pattern/replacement length mismatch -- would shift file offsets"' \
+      '' \
+      'data = open(path, "rb").read()' \
+      'count = data.count(old)' \
+      'if count != 1:' \
+      '    sys.exit(' \
+      '        "FATAL: expected exactly 1 UTF-16LE occurrence of ACTIONS_RESULTS_URL in "' \
+      '        + path + ", found " + str(count) + ". 0 means upstream renamed or removed "' \
+      '        "the string; >1 means the single-site assumption behind this patch no "' \
+      '        "longer holds. A human must re-verify against "' \
+      '        "https://github.com/falcondev-oss/github-actions-cache-server/issues/265 "' \
+      '        "before proceeding."' \
+      '    )' \
+      '' \
+      'open(path, "wb").write(data.replace(old, new))' \
+      '' \
+      'verify = open(path, "rb").read()' \
+      'if verify.count(old) != 0 or verify.count(new) != 1:' \
+      '    sys.exit("FATAL: post-patch verification failed for " + path)' \
+      '' \
+      'print(' \
+      '    "OK: patched " + path + " (" + str(len(old)) + " bytes) -- renamed "' \
+      '    "ACTIONS_RESULTS_URL to ACTIONS_RESULTS_ORL, 1 occurrence, no byte-offset shift"' \
+      ')' \
+      > /tmp/patch-runner-worker-dll.py; \
+    python3 /tmp/patch-runner-worker-dll.py; \
+    rm -f /tmp/patch-runner-worker-dll.py
+
 # ---- Rootless container build (Buildah) + run (Podman) — replaces dind -------
 # Daemonless + rootless: jobs build images (buildah) and run compose stacks
 # (podman) WITHOUT a privileged `docker:dind` sidecar, so the runner pod is a
