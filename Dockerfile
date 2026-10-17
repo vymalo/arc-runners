@@ -87,6 +87,15 @@ ARG GUM_VERSION=0.17.0
 # against the release `checksums` table, SHA-256 column) and verified at build.
 ARG YQ_VERSION=4.53.3
 ARG YQ_SHA256=fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4
+# AWS CLI v2 — GitHub-hosted ubuntu bundles it; workflows that stage build
+# artifacts through S3-compatible storage (`aws s3 cp` against the in-cluster
+# RustFS, e.g. ADORSYS-GIS/webank-services publish-images.yml "Validate S3
+# artifact config") hard-fail on these runners without it (2026-10-17). AWS
+# publishes only a GPG signature for the installer zip, no .sha256 asset, so
+# the zip's digest is pinned here (computed from the download) and verified
+# at build, same stance as yq/buildkit above. Re-compute when bumping.
+ARG AWS_CLI_VERSION=2.38.1
+ARG AWS_CLI_SHA256=b11ed416d91f4251da363a17706938eeaf0e520745754c104c0c1890dd8363c7
 # Docker Compose binary — used ONLY as the `podman compose` provider (Podman
 # runs the dev-stack smoke test; no Docker daemon involved). Verified at build
 # via the release's published .sha256 asset.
@@ -182,6 +191,12 @@ ARG REVIEWDOG_VERSION=0.20.2
 #   wget    — this image otherwise ships only curl; many third-party action
 #             install scripts and shell steps assume wget.
 #   rsync   — deploy/sync steps and actions that shell out to it.
+#   xxd     — hex dump/undump (vim-common's standalone package on noble).
+#             GitHub-hosted ubuntu ships it; scripts that derive JWKs from
+#             EC keys (`openssl ... | xxd -r -p`, e.g. ADORSYS-GIS/webank-services
+#             scripts/gen-service-keys.sh) hard-fail without it, which took
+#             that repo's `cargo nextest` job down on every branch once CI
+#             moved onto these runners (2026-10-17).
 # (openssh-client is already in the base, so it is intentionally NOT listed.)
 # These track Ubuntu's repo — unpinned, like buildah/podman below.
 RUN apt-get update -y \
@@ -200,6 +215,7 @@ RUN apt-get update -y \
        zstd \
        wget \
        rsync \
+       xxd \
        unzip \
        xz-utils \
        zip \
@@ -428,6 +444,20 @@ RUN set -eux; \
     echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -; \
     chmod 0755 /usr/local/bin/yq; \
     yq --version
+
+# ---- AWS CLI v2 (S3 artifact hand-off in consuming repos' CI) -----------
+# Official standalone installer (bundles its own Python); /usr/local/bin/aws
+# symlink lands on PATH for every user. `--bin-dir`/`--install-dir` are the
+# installer defaults, spelled out so a bump cannot silently move them.
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip" \
+      -o /tmp/awscliv2.zip; \
+    echo "${AWS_CLI_SHA256}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2; \
+    /tmp/awscliv2/aws/install --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin; \
+    rm -rf /tmp/awscliv2 /tmp/awscliv2.zip; \
+    aws --version
 
 # ---- sccache (shared S3-compatible compilation cache) -----------------
 # Prebuilt musl binary (seconds to fetch vs minutes to compile). Consumed

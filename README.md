@@ -42,7 +42,7 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 
 | Ecosystem | Tools |
 | --------- | ----- |
-| **System** | build-essential, pkg-config, libssl-dev, cmake, clang, libclang-dev, curl, **wget**, git, **git-lfs**, **zstd**, **rsync**, unzip, xz-utils, zip, **zsh**, **moreutils** (`chronic`), **jq** |
+| **System** | build-essential, pkg-config, libssl-dev, cmake, clang, libclang-dev, curl, **wget**, git, **git-lfs**, **zstd**, **rsync**, **xxd**, unzip, xz-utils, zip, **zsh**, **moreutils** (`chronic`), **jq** |
 | **Rust** | stable toolchain (rustup) + `rustfmt`/`clippy`/`rust-src`/`llvm-tools-preview` + `wasm32-unknown-unknown` target; cargo tools `cargo-llvm-cov`, `just`, `cargo-nextest`, `cargo-deny`, `sccache` |
 | **Codegen** | `flutter_rust_bridge_codegen`, `cratestack-cli` |
 | **Node / JS** | Node (**22** or **24**, matrix axis) + `pnpm` (via corepack) |
@@ -50,7 +50,7 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 | **Flutter** | Flutter SDK (bundles Dart) + precached engine/Android artifacts |
 | **Android** | cmdline-tools + platform-tools + build-tools + platform, on OpenJDK **21** |
 | **Mobile release** | Ruby + bundler + fastlane |
-| **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client), `gh` (GitHub CLI) |
+| **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client), `aws` (AWS CLI v2), `gh` (GitHub CLI) |
 | **Pre-commit** | `pre-commit` (via pipx) |
 | **Runner patch** | `Runner.Worker.dll` byte-patched so `ACTIONS_RESULTS_URL` survives — see [GitHub Actions cache server compatibility](#github-actions-cache-server-compatibility-actions_results_url-patch) |
 
