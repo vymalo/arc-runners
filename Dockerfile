@@ -9,22 +9,26 @@
 # See README.md for the full inventory + rationale.
 #
 # Baked in, by ecosystem:
-#   Rust       — stable toolchain (rustup) + rustfmt/clippy/rust-src/
-#                llvm-tools-preview components + wasm32-unknown-unknown
-#                target; cargo tools: cargo-llvm-cov, just, cargo-nextest,
-#                cargo-deny, sccache (shared S3-compatible compile cache).
+#   Rust       — pinned toolchain (RUST_VERSION, rustup default) +
+#                rustfmt/clippy/rust-src/llvm-tools-preview components +
+#                wasm32-unknown-unknown and flutter_rust_bridge's twelve
+#                template targets; cargo tools: cargo-llvm-cov, just,
+#                cargo-nextest, cargo-deny, sccache (shared S3-compatible
+#                compile cache).
 #   Codegen    — flutter_rust_bridge_codegen (FRB) + cratestack-cli.
 #   Node/JS    — Node + pnpm (via corepack). Node major is a BUILD MATRIX
 #                axis: we ship 22 and 24 (set via NODE_VERSION build-arg).
 #   Browser    — Google Chrome stable (headless) for web/e2e test lanes
 #                (`flutter test --platform chrome`, Karma, Puppeteer). amd64-only.
 #   Flutter    — Flutter SDK (bundles Dart) + precached engine artifacts.
-#   Android    — cmdline-tools + platform-tools + build-tools + platform,
-#                on OpenJDK 21 (JAVA_VERSION arg), for `flutter build apk`
-#                / Gradle. JDK 21 is inside every current Gradle/AGP support
-#                window. The arg is parameterized so a JDK 25 leg can be added
-#                later, but only 21 is built today (newer JDKs need validation
-#                against the consuming repo's Gradle/AGP pins first).
+#   Android    — cmdline-tools + platform-tools + build-tools + platform +
+#                NDK (Flutter's default ndkVersion; >= 27 for Rust cores built
+#                by the frb native-assets hook), on OpenJDK 21 (JAVA_VERSION
+#                arg), for `flutter build apk` / Gradle. JDK 21 is inside
+#                every current Gradle/AGP support window. The arg is
+#                parameterized so a JDK 25 leg can be added later, but only
+#                21 is built today (newer JDKs need validation against the
+#                consuming repo's Gradle/AGP pins first).
 #   Mobile rel — Ruby + bundler + fastlane (Android build/release lane).
 #   Ops/k8s    — kubectl, helm, argocd, mc (MinIO client), gh (GitHub CLI).
 #   Containers — rootless Buildah (image build) + Podman (run/compose) +
@@ -114,12 +118,28 @@ ARG BUILDKIT_SHA256=1fc78750d0c96bdc18799a3c0b551d6807bd4939e8cd79e357823e467451
 # networking. Digest pinned from the release asset (verified at build).
 ARG ROOTLESSKIT_VERSION=3.0.2
 ARG ROOTLESSKIT_SHA256=f4f2764cdd99db4f3fa715acac9d760c49a5e7c2838f180bdbe3188cec248dfb
-# FRB CLI MUST match the plugins' `flutter_rust_bridge = "=2.12.0"`; this is
-# repo-pinned, not a latest-tracking value.
-ARG FRB_VERSION=2.12.0
+# FRB CLI MUST equal the app's flutter_rust_bridge pin: frb refuses to run
+# with mixed versions between the codegen, the Dart runtime and the Rust
+# crate. The consuming app pins 2.13.0 exactly — cratestack_cbor 0.16.0
+# (pub.dev) depends on `flutter_rust_bridge: 2.13.0`, and fespalier's
+# examples/frb-cose/rust/Cargo.toml pins `flutter_rust_bridge = "=2.13.0"`.
+# Repo-pinned, not latest-tracking (crates.io: 2.13.0 is the newest stable;
+# 2.14.0 is beta-only). Repos still on `=2.12.0` must bump with it, or install
+# their own codegen version at job time.
+ARG FRB_VERSION=2.13.0
 # cratestack-cli tracks the consuming project's cratestack version
-# (resolved from crates.io). Keep it in lockstep with that pin.
-ARG CRATESTACK_VERSION=0.4.8
+# (resolved from crates.io). Keep it in lockstep with that pin. 0.16.0
+# declares rust-version 1.98.0, which RUST_VERSION below satisfies.
+ARG CRATESTACK_VERSION=0.16.0
+# Rust toolchain installed as rustup's DEFAULT, pinned instead of `stable` to
+# the consuming app's rust-toolchain.toml `channel = "1.98.1"` (cratestack's
+# MSRV is 1.98.0). Resolved from static.rust-lang.org/dist/
+# channel-rust-1.98.1.toml, which also lists a rust-std for every target baked
+# below. NOTE: this is deliberately NOT latest stable (1.99.1 at the time of
+# writing) — it follows the app's toolchain file. Jobs that ask for `stable`
+# (e.g. dtolnay/rust-toolchain@stable) will download it per job; bump this
+# together with the app's toolchain file.
+ARG RUST_VERSION=1.98.1
 # cargo-binstall. Pinned to a GitHub release TAG, NOT the upstream
 # install-from-binstall-release.sh script fetched from `main` (that script
 # has no version anywhere and can change behavior on any upstream commit —
@@ -140,6 +160,18 @@ ARG ANDROID_CMDLINE_TOOLS=15641748
 # xpath when bumping.
 ARG ANDROID_PLATFORM=android-36
 ARG ANDROID_BUILD_TOOLS=37.0.0
+# Android NDK. NOT a latest-tracking pin: it is the `ndkVersion` default of the
+# Flutter release baked below — packages/flutter_tools/gradle/src/main/kotlin/
+# FlutterExtension.kt at tag 3.44.4 has `val ndkVersion: String =
+# "28.2.13676358"` — so an app that keeps `ndkVersion = flutter.ndkVersion`
+# finds its NDK installed instead of AGP fetching ~720 MB on every job. Hard
+# floor of 27: flutter_rust_bridge's native-assets hook (native_toolchain_rust)
+# builds a Rust core with the NDK's `<triple>35-clang` wrappers, which first
+# shipped in NDK 27. Re-resolve from FlutterExtension.kt whenever
+# FLUTTER_VERSION moves, and check the exact path is in the stable channel:
+#   xmllint --xpath '//remotePackage[channelRef/@ref="channel-0" and
+#     @path="ndk;28.2.13676358"]/@path' repository2-1.xml
+ARG ANDROID_NDK_VERSION=28.2.13676358
 ARG KUBECTL_VERSION=1.36.2
 # helm 4.x — major bump from 3.x, but it maintains chart backwards
 # compatibility (https://helm.sh/docs/overview/), so existing charts work.
@@ -529,8 +561,19 @@ RUN set -eux; \
 # to the runner user so Gradle/Flutter can write into it. Platform +
 # build-tools are pinned to the stable-channel maxima (see the ARG block);
 # sdkmanager installs from the stable channel by default.
+#
+# The NDK lands side by side at ${ANDROID_SDK_ROOT}/ndk/<version> (where AGP
+# looks for `ndkVersion`), and ANDROID_NDK_HOME/ANDROID_NDK_ROOT name it for
+# tools that read the environment. flutter_tools (3.44.4, android_sdk.dart)
+# checks ANDROID_NDK_HOME before falling back to the newest ndk/<version>, and
+# hands that NDK's clang to the native-assets hook — so a Rust core built
+# through flutter_rust_bridge compiles with exactly this NDK. The smoke lines
+# assert the version and the three Android ABI `*35-clang` wrappers that
+# native_toolchain_rust requires, then run one of them.
 ENV ANDROID_SDK_ROOT=/opt/android-sdk \
     ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION} \
+    ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}
 RUN set -eux; \
     mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"; \
     curl --proto '=https' --tlsv1.2 -fsSL \
@@ -544,8 +587,15 @@ RUN set -eux; \
     "$sdkmanager" --sdk_root="${ANDROID_SDK_ROOT}" --install \
        "platform-tools" \
        "platforms;${ANDROID_PLATFORM}" \
-       "build-tools;${ANDROID_BUILD_TOOLS}"; \
-    chown -R runner:runner "${ANDROID_SDK_ROOT}"
+       "build-tools;${ANDROID_BUILD_TOOLS}" \
+       "ndk;${ANDROID_NDK_VERSION}"; \
+    chown -R runner:runner "${ANDROID_SDK_ROOT}"; \
+    grep -F "Pkg.Revision = ${ANDROID_NDK_VERSION}" "${ANDROID_NDK_HOME}/source.properties"; \
+    ndk_bin="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"; \
+    for clang in aarch64-linux-android35-clang armv7a-linux-androideabi35-clang x86_64-linux-android35-clang; do \
+      test -x "${ndk_bin}/${clang}"; \
+    done; \
+    "${ndk_bin}/aarch64-linux-android35-clang" --version
 
 # ---- Ruby gems: bundler + fastlane ------------------------------------
 RUN set -eux; \
@@ -630,11 +680,35 @@ ENV CARGO_HOME=/home/runner/.cargo \
 ENV PATH=/home/runner/.cargo/bin:/home/runner/.local/bin:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:$PATH
 
 # ---- Rust toolchain + components + targets ----------------------------
+# RUST_VERSION (not `stable`) is the default toolchain, and every target the
+# consuming app's rust-toolchain.toml lists is baked. When a toolchain file
+# lists targets, rustup installs any missing one on the FIRST cargo/rustup
+# invocation in that directory (verified with rustup 1.29.2: with only the
+# bare 1.98.1 installed, `cargo --version` next to fespalier's frb-cose
+# toolchain file first downloads the 11 missing targets), and an ARC pod keeps
+# no ~/.rustup between jobs — so an unbaked target set is ~1.5 GB
+# re-downloaded on every job (README: why bake).
+# After wasm32-unknown-unknown come flutter_rust_bridge 2.13.0's twelve
+# template targets, verbatim from fespalier's
+# examples/frb-cose/rust/rust-toolchain.toml (Android x3, iOS x3, macOS x2,
+# Linux x2, Windows x2). Keep this list a superset of the app's toolchain file
+# whenever either changes. The Apple/Windows entries are rust-std only: this
+# Linux image cannot link for them, but rustup still fetches every listed
+# target, so they must be present for the file to resolve offline.
 RUN set -eux; \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --no-modify-path; \
+      | sh -s -- -y --default-toolchain "${RUST_VERSION}" --no-modify-path; \
     rustup component add llvm-tools-preview rustfmt clippy rust-src; \
-    rustup target add wasm32-unknown-unknown
+    rustup target add \
+      wasm32-unknown-unknown \
+      aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+      aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
+      aarch64-apple-darwin x86_64-apple-darwin \
+      x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+      x86_64-pc-windows-msvc aarch64-pc-windows-msvc; \
+    rustc --version | grep -F "rustc ${RUST_VERSION} "; \
+    cargo --version; \
+    rustup target list --installed
 
 # ---- Cargo tools via cargo-binstall (prebuilt binaries; compile only as
 #      a last resort) so the image build stays well under timeout --------
@@ -642,8 +716,16 @@ RUN set -eux; \
 # rate limit from 60 to 5000 req/hr — without it the resolver hammers
 # api.github.com unauthenticated and eats minutes of 504 retries. Mounted
 # as a secret (never layered); `set -eu` WITHOUT -x so it isn't echoed.
-# `cratestack` has no top-level --version (it requires a subcommand), so
-# verify it with --help.
+# `cratestack --version` prints `cratestack <ver>` as of 0.16.0 (0.4.x had no
+# top-level --version and was smoke-tested with --help instead).
+# binstall picks each unpinned tool's NEWEST release and, when no prebuilt
+# binary resolves, runs `cargo install --version <that>` on the default
+# toolchain — RUST_VERSION, deliberately not latest stable. A tool whose newest
+# release needs a newer rustc therefore fails here. Checked for this pin
+# (crates.io rust-version): cargo-llvm-cov 0.9.1 1.87, just 1.59.0 1.89.0,
+# cargo-nextest 0.9.150 1.91, cargo-deny 0.20.2 1.88.0, frb codegen 2.13.0
+# 1.74.0, cratestack-cli 0.16.0 1.98.0; all six also compile from source on
+# 1.98.1.
 RUN --mount=type=secret,id=github_token \
     set -eu; \
     if [ -s /run/secrets/github_token ]; then \
@@ -674,7 +756,7 @@ RUN --mount=type=secret,id=github_token \
     cargo nextest --version; \
     cargo deny --version; \
     flutter_rust_bridge_codegen --version; \
-    cratestack --help >/dev/null
+    cratestack --version
 
 # ---- Baked self-config -------------------------------------------------
 # Config the runner needs regardless of which lane runs, so the image is

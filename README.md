@@ -43,12 +43,12 @@ Every tool is pinned to a bumpable `ARG` in the [`Dockerfile`](./Dockerfile).
 | Ecosystem | Tools |
 | --------- | ----- |
 | **System** | build-essential, pkg-config, libssl-dev, cmake, clang, libclang-dev, curl, **wget**, git, **git-lfs**, **zstd**, **rsync**, **xxd**, unzip, xz-utils, zip, **zsh**, **moreutils** (`chronic`), **jq** |
-| **Rust** | stable toolchain (rustup) + `rustfmt`/`clippy`/`rust-src`/`llvm-tools-preview` + `wasm32-unknown-unknown` target; cargo tools `cargo-llvm-cov`, `just`, `cargo-nextest`, `cargo-deny`, `sccache` |
-| **Codegen** | `flutter_rust_bridge_codegen`, `cratestack-cli` |
+| **Rust** | pinned toolchain (`RUST_VERSION`, **1.98.1**, rustup default — not `stable`) + `rustfmt`/`clippy`/`rust-src`/`llvm-tools-preview`; targets `wasm32-unknown-unknown` + flutter_rust_bridge 2.13.0's twelve template targets (`aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`); cargo tools `cargo-llvm-cov`, `just`, `cargo-nextest`, `cargo-deny`, `sccache` |
+| **Codegen** | `flutter_rust_bridge_codegen` **2.13.0**, `cratestack-cli` **0.16.0** |
 | **Node / JS** | Node (**22** or **24**, matrix axis) + `pnpm` (via corepack) |
 | **Browser** | Google Chrome stable (headless) — `flutter test --platform chrome`, Karma, Puppeteer; `chromium` symlink + `CHROME_EXECUTABLE`/`CHROME_BIN` set |
 | **Flutter** | Flutter SDK (bundles Dart) + precached engine/Android artifacts |
-| **Android** | cmdline-tools + platform-tools + build-tools + platform, on OpenJDK **21** |
+| **Android** | cmdline-tools + platform-tools + build-tools + platform + **NDK 28.2.13676358** (`ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT` set), on OpenJDK **21** |
 | **Mobile release** | Ruby + bundler + fastlane |
 | **Ops / k8s** | `kubectl`, `helm`, `argocd`, `mc` (MinIO client), `aws` (AWS CLI v2), `gh` (GitHub CLI) |
 | **Pre-commit** | `pre-commit` (via pipx) |
@@ -62,10 +62,38 @@ tracking pins are resolved from authoritative release sources (GitHub releases,
 crates.io) — re-resolve when bumping rather than guessing. A few are intentionally
 project-determined:
 
-- **`FRB_VERSION`** must match the `flutter_rust_bridge` crate version your
-  plugins pin (the generated bindings are version-locked to it).
-- **`CRATESTACK_VERSION`** tracks the cratestack version your project consumes,
-  so generated clients match.
+- **`FRB_VERSION`** (**2.13.0**) must equal the `flutter_rust_bridge` version
+  your app pins: frb refuses mixed versions between the codegen, the Dart
+  runtime and the Rust crate. 2.13.0 is what `cratestack_cbor` 0.16.0
+  (pub.dev) depends on and what fespalier's `frb-cose` example pins
+  (`=2.13.0`). A repo still on `=2.12.0` (e.g. `vymalo/frb-tray-spike`) must
+  bump, or install its own codegen version at job time.
+- **`CRATESTACK_VERSION`** (**0.16.0**) tracks the cratestack version your
+  project consumes, so generated clients match. 0.16.0 declares
+  `rust-version = 1.98.0`.
+- **`RUST_VERSION`** (**1.98.1**) is rustup's **default** toolchain, pinned to
+  the app's `rust-toolchain.toml` `channel` rather than `stable` — so it is
+  intentionally *behind* latest stable at times (1.99.1 when this pin was
+  set). Every target that toolchain file lists is baked, because rustup
+  fetches any missing listed target on the first `cargo` run in that
+  directory, and a pod keeps no `~/.rustup` between jobs (≈1.5 GB of targets
+  per job otherwise). Keep the baked target list a superset of the app's
+  toolchain file, and bump `RUST_VERSION` together with it. Jobs that request
+  `stable` explicitly (e.g. `dtolnay/rust-toolchain@stable`) download it per
+  job. The unpinned cargo tools fall back to compiling on this toolchain when
+  no prebuilt binary resolves, so a tool whose newest release needs a newer
+  `rustc` would break the build.
+- **`ANDROID_NDK_VERSION`** (**28.2.13676358**) is the `ndkVersion` default of
+  the baked Flutter release (`FlutterExtension.kt` at the `3.44.4` tag), so
+  `ndkVersion = flutter.ndkVersion` apps don't download an NDK per job.
+  flutter_rust_bridge's native-assets hook needs **NDK ≥ 27** (it uses the
+  `<triple>35-clang` wrappers). Flutter's native-assets build checks
+  `ANDROID_NDK_HOME` before scanning `$ANDROID_HOME/ndk/`, so it uses this NDK
+  even if a project pins another `ndkVersion` for Gradle (Gradle then still
+  fetches that one per job). Re-resolve
+  from `FlutterExtension.kt` whenever `FLUTTER_VERSION` moves, and confirm the
+  path is on the stable channel (`channel-0`) of Google's
+  `repository2-1.xml`.
 - **`FLUTTER_VERSION`** must ship a Dart version that meets your app's pubspec
   floor.
 - **`JAVA_VERSION`** and **`NODE_VERSION`** are **build-matrix axes** — the
